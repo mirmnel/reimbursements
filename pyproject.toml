@@ -1,0 +1,9 @@
+[project]
+name = "auctionrl"
+version = "0.1.0"
+description = "Multi-agent RL for the costly Japanese clock auction with reimbursements"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools]
+py-modules = ["auctionrl", "game", "verify"]
