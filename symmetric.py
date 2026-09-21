@@ -1,8 +1,9 @@
-"""The count-based reduction of ADR-0001, evaluating a symmetric profile on counts of active bidders."""
+"""The orbit-based reduction, evaluating a symmetric profile on exit-round orbits rather than histories."""
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -41,14 +42,13 @@ def bucket_means(index: np.ndarray, size: int, sigma: np.ndarray) -> np.ndarray:
 
 
 def anonymise(auction: Auction, sigma: np.ndarray) -> np.ndarray:
-    """Mean stay probability of ``sigma`` in each (round, active count, signal) bucket."""
-    size = auction.rounds * (auction.n + 1) * 2
-    return bucket_means(auction.anonymous_index, size, sigma).reshape(auction.rounds, auction.n + 1, 2)
+    """Mean stay probability of ``sigma`` in each (orbit, signal) bucket."""
+    return bucket_means(auction.orbit_index, len(auction.orbits) * 2, sigma).reshape(-1, 2)
 
 
 def broadcast(auction: Auction, stay: np.ndarray) -> np.ndarray:
-    """The flat profile in which every bidder plays its own bucket's entry of ``stay``."""
-    return stay.ravel()[auction.anonymous_index]
+    """The flat profile in which every bidder plays its own orbit's entry of ``stay``."""
+    return stay.ravel()[auction.orbit_index]
 
 
 def symmetrise(auction: Auction, sigma: np.ndarray) -> np.ndarray:
@@ -62,41 +62,81 @@ def is_symmetric(auction: Auction, sigma: np.ndarray) -> bool:
 
 
 def applies(auction: Auction, sigma: np.ndarray) -> bool:
-    """Whether the reduction is valid here, which needs symmetry."""
-    return is_symmetric(auction, sigma)
+    """Whether the reduction is valid here, which needs symmetry, an exchangeable prior and an orbit rule."""
+    return auction.exchangeable_signals and auction.orbit_measurable and is_symmetric(auction, sigma)
+
+
+def requires_exchangeability(auction: Auction) -> None:
+    """Refuse the reduction where relabelling the bidders changes the prior or the reimbursement rule."""
+    if not auction.exchangeable_signals:
+        raise ValueError(
+            "the orbit reduction reads the signal profile through its high-signal count alone, which a "
+            "prior that is not exchangeable breaks. Evaluate on histories instead, by way of "
+            "solver.evaluate or analysis.utility_loss"
+        )
+    if not auction.orbit_measurable:
+        raise ValueError(
+            "the orbit reduction pays one reimbursement per orbit, which a rule separating histories "
+            "inside an orbit breaks. Evaluate on histories instead, by way of solver.evaluate"
+        )
+
+
+def refunds_of(auction: Auction, refunds: Optional[np.ndarray]) -> np.ndarray:
+    """The per-orbit reimbursement to evaluate under, being the auction's own unless one is supplied."""
+    return auction.orbit_reimburses if refunds is None else refunds
+
+
+@lru_cache(maxsize=None)
+def _arrangements(n: int, departed: Tuple[int, ...]) -> float:
+    """How many ways the other bidders fill one orbit's exit rounds, a given bidder staying in."""
+    total, remaining = math.comb(n - 1, n - 1 - len(departed)), len(departed)
+    for count in Counter(departed).values():
+        total *= math.comb(remaining, count)
+        remaining -= count
+    return float(total)
+
+
+def arrangements(auction: Auction) -> np.ndarray:
+    """Per orbit, how many histories in it leave a given bidder active."""
+    return np.array([_arrangements(auction.n, departed) for _, departed in auction.orbits])
 
 
 # ---------------------------------------------------------------------------
-# Seller accounting on counts of active bidders
+# Seller accounting on orbits
 # ---------------------------------------------------------------------------
 
 
-def seller_values(auction: Auction, stay: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Expected price, reimbursement and staying bidder-rounds from each count state onward."""
-    n = auction.n
-    price = np.zeros((auction.rounds + 1, n + 1, n + 1))
-    payout, stayed = np.zeros_like(price), np.zeros_like(price)
-    for round_index in reversed(range(auction.rounds)):
-        for high in range(n + 1):
-            for low in range(n + 1 - high):
-                if high + low < 2:
-                    continue
-                active = high + low
-                refund = auction.reimburses(round_index)
-                thin = np.outer(
-                    thinning(high, stay[round_index, active, 1]), thinning(low, stay[round_index, active, 0])
-                )
-                stayers = np.add.outer(np.arange(high + 1), np.arange(low + 1))
-                carries = (stayers >= 2) & (round_index + 1 < auction.rounds)
-                ended = auction.price(np.where(stayers >= 2, auction.rounds, round_index))
-                onward = (round_index + 1, slice(high + 1), slice(low + 1))
-                next_price, next_payout, next_stayed = price[onward], payout[onward], stayed[onward]
-                price[round_index, high, low] = np.sum(thin * np.where(carries, next_price, ended))
-                payout[round_index, high, low] = np.sum(
-                    thin * (stayers * refund + np.where(carries, next_payout, 0.0))
-                )
-                stayed[round_index, high, low] = np.sum(thin * (stayers + np.where(carries, next_stayed, 0.0)))
-    return price[0], payout[0], stayed[0]
+def _onward(auction: Auction, orbit: int, leaving: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Where each number of departures leads, and whether the auction carries on at all."""
+    onward = auction.onward_orbit[orbit][leaving]
+    return np.where(onward >= 0, onward, 0), onward >= 0
+
+
+def seller_values(
+    auction: Auction, stay: np.ndarray, refunds: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Expected price, reimbursement and staying bidder-rounds from each orbit onward."""
+    requires_exchangeability(auction)
+    paid = refunds_of(auction, refunds)
+    shape = (len(auction.orbits), auction.n + 1)
+    price, payout, stayed = np.zeros(shape), np.zeros(shape), np.zeros(shape)
+    for orbit in reversed(range(len(auction.orbits))):
+        round_index = auction.orbits[orbit][0]
+        active = int(auction.orbit_active[orbit])
+        refund = paid[orbit]
+        for high in range(active + 1):
+            low = active - high
+            thin = np.outer(thinning(high, stay[orbit, 1]), thinning(low, stay[orbit, 0]))
+            stayers = np.add.outer(np.arange(high + 1), np.arange(low + 1))
+            safe, carries = _onward(auction, orbit, active - stayers)
+            ended = auction.price(np.where(stayers >= 2, auction.rounds, round_index))
+            survivors = np.broadcast_to(np.arange(high + 1)[:, None], stayers.shape)
+            price[orbit, high] = np.sum(thin * np.where(carries, price[safe, survivors], ended))
+            payout[orbit, high] = np.sum(
+                thin * (stayers * refund + np.where(carries, payout[safe, survivors], 0.0))
+            )
+            stayed[orbit, high] = np.sum(thin * (stayers + np.where(carries, stayed[safe, survivors], 0.0)))
+    return price, payout, stayed
 
 
 # ---------------------------------------------------------------------------
@@ -105,21 +145,22 @@ def seller_values(auction: Auction, stay: np.ndarray) -> Tuple[np.ndarray, np.nd
 
 
 def branches_at(
-    auction: Auction, stay: np.ndarray, values: Values, round_index: int, high: int, low: int
+    auction: Auction, stay: np.ndarray, values: Values, orbit: int, high: int, refund: float
 ) -> Tuple[np.ndarray, Values, Values]:
-    """Thinning weights at a count state, and the tagged bidder's value under each action."""
+    """Thinning weights at an orbit, and the tagged bidder's value under each action."""
     const, coefficient = values
-    active = high + low + 1
-    thin = np.outer(thinning(high, stay[round_index, active, 1]), thinning(low, stay[round_index, active, 0]))
-    stayers = np.add.outer(np.arange(high + 1), np.arange(low + 1))
-    carries = (stayers >= 1) & (round_index + 1 < auction.rounds)
+    round_index = auction.orbits[orbit][0]
+    active = int(auction.orbit_active[orbit])
+    low = active - 1 - high
+    thin = np.outer(thinning(high, stay[orbit, 1]), thinning(low, stay[orbit, 0]))
+    stayers = np.add.outer(np.arange(high + 1), np.arange(low + 1))  # the other bidders who stay
+    safe, carries = _onward(auction, orbit, (active - 1) - stayers)
     ended = auction.price(np.where(stayers >= 1, auction.rounds, round_index))
-    onward = (round_index + 1, slice(high + 1), slice(low + 1))
-    next_const, next_coefficient = const[onward], coefficient[onward]
+    survivors = np.broadcast_to(np.arange(high + 1)[:, None], stayers.shape)
     staying = (
-        -(auction.c - auction.reimburses(round_index))
-        + np.where(carries, next_const, -ended / (stayers + 1)),
-        np.where(carries, next_coefficient, 1.0 / (stayers + 1)),
+        -(auction.c - refund)
+        + np.where(carries, const[safe, survivors], -ended / (stayers + 1)),
+        np.where(carries, coefficient[safe, survivors], 1.0 / (stayers + 1)),
     )
     alone = stayers == 0  # all exit at once, so every active bidder splits the prize
     exiting = (
@@ -130,67 +171,80 @@ def branches_at(
 
 
 def empty_values(auction: Auction) -> Values:
-    """Zeroed tables over rounds and the other bidders' counts, for a backward sweep to fill."""
-    shape = (auction.rounds + 1, auction.n, auction.n)
+    """Zeroed tables over the orbits and the other bidders' high-signal counts, for a backward sweep."""
+    shape = (len(auction.orbits), auction.n)
     return np.zeros(shape), np.zeros(shape)
 
 
-def tagged_values(auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int) -> Values:
-    """A tagged bidder's payoff from each count state, as a constant and a coefficient on the value."""
+def tagged_values(
+    auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int,
+    refunds: Optional[np.ndarray] = None,
+) -> Values:
+    """A tagged bidder's payoff from each orbit, as a constant and a coefficient on the value."""
+    requires_exchangeability(auction)
+    paid = refunds_of(auction, refunds)
     values = empty_values(auction)
-    for round_index in reversed(range(auction.rounds)):
-        for high in range(auction.n):
-            for low in range(auction.n - high):
-                thin, staying, exiting = branches_at(auction, stay, values, round_index, high, low)
-                own = deviation[round_index, high + low + 1, signal]
-                for table, on_stay, on_exit in zip(values, staying, exiting):
-                    table[round_index, high, low] = np.sum(thin * (own * on_stay + (1.0 - own) * on_exit))
+    for orbit in reversed(range(len(auction.orbits))):
+        own = deviation[orbit, signal]
+        for high in range(int(auction.orbit_active[orbit])):
+            thin, staying, exiting = branches_at(auction, stay, values, orbit, high, paid[orbit])
+            for table, on_stay, on_exit in zip(values, staying, exiting):
+                table[orbit, high] = np.sum(thin * (own * on_stay + (1.0 - own) * on_exit))
     return values
 
 
 def tagged_reach(
     auction: Auction, stay: np.ndarray, signal: int, own: Optional[np.ndarray] = None
 ) -> Values:
-    """Reach of each count state for a tagged bidder playing ``own``, and the same weighted by value."""
-    n, q, others = auction.n, auction.q, auction.n - 1
-    mass = np.zeros((auction.rounds, n, n))
+    """Reach of each orbit for a tagged bidder playing ``own``, and the same weighted by value."""
+    requires_exchangeability(auction)
+    n, others = auction.n, auction.n - 1
+    mass = np.zeros((len(auction.orbits), n))
     value_mass = np.zeros_like(mass)
-    opening = (q if signal == 1 else 1 - q) * thinning(others, q)
-    for high in range(others + 1):
-        mass[0, high, others - high] = opening[high]
-        value_mass[0, high, others - high] = opening[high] * (high + signal) / n
-    for round_index in range(auction.rounds - 1):
-        for high in range(n):
-            for low in range(n - high):
-                if mass[round_index, high, low] == 0.0:
-                    continue
-                active = high + low + 1
-                thin = np.outer(
-                    thinning(high, stay[round_index, active, 1]), thinning(low, stay[round_index, active, 0])
-                )
-                thin[0, 0] = 0.0  # a lone stayer ends the auction, reaching no later round
-                if own is not None:
-                    thin = thin * own[round_index, active, signal]
-                mass[round_index + 1, : high + 1, : low + 1] += mass[round_index, high, low] * thin
-                value_mass[round_index + 1, : high + 1, : low + 1] += value_mass[round_index, high, low] * thin
+    # Joint in the tagged bidder's own signal and how many of the others drew high, which under a
+    # correlated prior is no longer its marginal times a binomial.
+    start = auction.own_and_others[signal]
+    mass[0, : others + 1] = start
+    value_mass[0, : others + 1] = start * (np.arange(others + 1.0) + signal) / n
+    for orbit in range(len(auction.orbits)):
+        active = int(auction.orbit_active[orbit])
+        for high in range(active):
+            if mass[orbit, high] == 0.0 and value_mass[orbit, high] == 0.0:
+                continue
+            low = active - 1 - high
+            thin = np.outer(thinning(high, stay[orbit, 1]), thinning(low, stay[orbit, 0]))
+            stayers = np.add.outer(np.arange(high + 1), np.arange(low + 1))
+            safe, carries = _onward(auction, orbit, (active - 1) - stayers)
+            if own is not None:
+                thin = thin * own[orbit, signal]
+            survivors = np.broadcast_to(np.arange(high + 1)[:, None], stayers.shape)
+            target = (safe[carries], survivors[carries])
+            np.add.at(mass, target, mass[orbit, high] * thin[carries])
+            np.add.at(value_mass, target, value_mass[orbit, high] * thin[carries])
     return mass, value_mass
+
+
+def signal_weight(auction: Auction, signal: int) -> float:
+    """A tagged bidder's own probability of drawing ``signal``."""
+    return auction.high_probability if signal == 1 else 1.0 - auction.high_probability
 
 
 def combine(auction: Auction, values: Values, signal: int) -> float:
     """Average a tagged bidder's opening value over how many others drew a high signal."""
+    requires_exchangeability(auction)
     const, coefficient = values
-    others = auction.n - 1
-    weights = thinning(others, auction.q)
-    high = np.arange(others + 1)
-    low = others - high
-    return float(
-        np.sum(weights * (const[0, high, low] + coefficient[0, high, low] * (high + signal) / auction.n))
-    )
+    high = np.arange(auction.n)
+    # Conditional on the tagged bidder's own signal, since the caller weights by that separately.
+    weights = auction.own_and_others[signal] / signal_weight(auction, signal)
+    return float(np.sum(weights * (const[0, high] + coefficient[0, high] * (high + signal) / auction.n)))
 
 
-def tagged_payoff(auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int) -> float:
+def tagged_payoff(
+    auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int,
+    refunds: Optional[np.ndarray] = None,
+) -> float:
     """Payoff of a tagged bidder holding ``signal`` and playing ``deviation`` against ``stay``."""
-    return combine(auction, tagged_values(auction, stay, deviation, signal), signal)
+    return combine(auction, tagged_values(auction, stay, deviation, signal, refunds), signal)
 
 
 # ---------------------------------------------------------------------------
@@ -198,83 +252,73 @@ def tagged_payoff(auction: Auction, stay: np.ndarray, deviation: np.ndarray, sig
 # ---------------------------------------------------------------------------
 
 
-def outcome(auction: Auction, sigma: np.ndarray) -> Outcome:
-    """Exact expectations under a symmetric profile, on counts of active bidders rather than sets."""
+def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
+    """Exact expectations under a symmetric profile, on exit-round orbits rather than histories."""
     stay = anonymise(auction, sigma)
-    price, payout, stayed = seller_values(auction, stay)
-    n, q = auction.n, auction.q
-    weights = thinning(n, q)
+    price, payout, stayed = seller_values(auction, stay, refunds)
+    n = auction.n
     high = np.arange(n + 1)
-    seller = [float(np.sum(weights * table[high, n - high])) for table in (price, payout, stayed)]
-    payoff = q * tagged_payoff(auction, stay, stay, 1) + (1 - q) * tagged_payoff(auction, stay, stay, 0)
+    seller = [float(np.sum(auction.signal_counts * table[0, high])) for table in (price, payout, stayed)]
+    payoff = sum(
+        signal_weight(auction, signal) * tagged_payoff(auction, stay, stay, signal, refunds)
+        for signal in (0, 1)
+    )
     return Outcome(np.full(n, payoff), seller[0], seller[1], seller[2])
 
 
-def bucket_reach(auction: Auction, sigma: np.ndarray) -> np.ndarray:
-    """Probability a bidder reaches each (round, active count, signal), under ``sigma`` symmetrised."""
+def bucket_arrival(auction: Auction, sigma: np.ndarray) -> np.ndarray:
+    """Probability a bidder actually arrives at each (orbit, signal), its own stays folded in."""
     stay = anonymise(auction, sigma)
-    reach = np.zeros((auction.rounds, auction.n + 1, 2))
-    for signal in (0, 1):
-        mass = tagged_reach(auction, stay, signal)[0]
-        for high in range(auction.n):
-            for low in range(auction.n - high):
-                reach[:, high + low + 1, signal] += mass[:, high, low]
-    return reach
+    return np.stack(
+        [tagged_reach(auction, stay, signal, stay)[0].sum(axis=1) for signal in (0, 1)], axis=1
+    )
 
 
 def gains(
-    auction: Auction, sigma: np.ndarray, own: Optional[np.ndarray] = None
+    auction: Auction, sigma: np.ndarray, own: Optional[np.ndarray] = None,
+    refunds: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Deviation gain and the reach weighting it, per active set of that size, at each information set."""
+    """Deviation gain and the reach weighting it, per history of that orbit, at each information set."""
     stay = anonymise(auction, sigma)
-    gain = np.zeros((auction.rounds, auction.n + 1, 2))
+    paid = refunds_of(auction, refunds)
+    gain = np.zeros((len(auction.orbits), 2))
     reach = np.zeros_like(gain)
     for signal in (0, 1):
         mass, value_mass = tagged_reach(auction, stay, signal, own)
-        values = tagged_values(auction, stay, stay, signal)
-        for round_index in range(auction.rounds):
-            for high in range(auction.n):
-                for low in range(auction.n - high):
-                    if mass[round_index, high, low] == 0.0:
-                        continue
-                    thin, staying, exiting = branches_at(auction, stay, values, round_index, high, low)
-                    active = high + low + 1
-                    gain[round_index, active, signal] += mass[round_index, high, low] * np.sum(
-                        thin * (staying[0] - exiting[0])
-                    ) + value_mass[round_index, high, low] * np.sum(thin * (staying[1] - exiting[1]))
-                    reach[round_index, active, signal] += mass[round_index, high, low]
-    sets = np.array([math.comb(auction.n - 1, max(size - 1, 0)) for size in range(auction.n + 1)], dtype=float)
-    return gain / sets[None, :, None], reach / sets[None, :, None]
+        values = tagged_values(auction, stay, stay, signal, refunds)
+        for orbit in range(len(auction.orbits)):
+            for high in range(int(auction.orbit_active[orbit])):
+                if mass[orbit, high] == 0.0 and value_mass[orbit, high] == 0.0:
+                    continue
+                thin, staying, exiting = branches_at(auction, stay, values, orbit, high, paid[orbit])
+                gain[orbit, signal] += mass[orbit, high] * np.sum(
+                    thin * (staying[0] - exiting[0])
+                ) + value_mass[orbit, high] * np.sum(thin * (staying[1] - exiting[1]))
+                reach[orbit, signal] += mass[orbit, high]
+    spread = arrangements(auction)[:, None]
+    return gain / spread, reach / spread
 
 
 def best_response(auction: Auction, stay: np.ndarray, signal: int) -> np.ndarray:
-    """A tagged bidder's best response to a symmetric profile, by a backward sweep on count states."""
+    """A tagged bidder's best response to a symmetric profile, by a backward sweep on orbits."""
     response = stay.copy()
     mass, value_mass = tagged_reach(auction, stay, signal)
+    paid = auction.orbit_reimburses
     values = empty_values(auction)
-    for round_index in reversed(range(auction.rounds)):
-        gain, branches = np.zeros(auction.n + 1), {}
-        for high in range(auction.n):
-            for low in range(auction.n - high):
-                branches[(high, low)] = branches_at(auction, stay, values, round_index, high, low)
-                thin, staying, exiting = branches[(high, low)]
-                gain[high + low + 1] += mass[round_index, high, low] * np.sum(
-                    thin * (staying[0] - exiting[0])
-                ) + value_mass[round_index, high, low] * np.sum(thin * (staying[1] - exiting[1]))
-        response[round_index, :, signal] = (gain > 0.0).astype(float)
-        for (high, low), (thin, staying, exiting) in branches.items():
-            own = response[round_index, high + low + 1, signal]
+    for orbit in reversed(range(len(auction.orbits))):
+        gain, branches = 0.0, {}
+        for high in range(int(auction.orbit_active[orbit])):
+            branches[high] = branches_at(auction, stay, values, orbit, high, paid[orbit])
+            thin, staying, exiting = branches[high]
+            gain += mass[orbit, high] * np.sum(
+                thin * (staying[0] - exiting[0])
+            ) + value_mass[orbit, high] * np.sum(thin * (staying[1] - exiting[1]))
+        response[orbit, signal] = float(gain > 0.0)
+        for high, (thin, staying, exiting) in branches.items():
+            own = response[orbit, signal]
             for table, on_stay, on_exit in zip(values, staying, exiting):
-                table[round_index, high, low] = np.sum(thin * (own * on_stay + (1.0 - own) * on_exit))
+                table[orbit, high] = np.sum(thin * (own * on_stay + (1.0 - own) * on_exit))
     return response
-
-
-def best_responses(auction: Auction, stay: np.ndarray) -> np.ndarray:
-    """The tagged bidder's best response at every information set, both signals in one table."""
-    table = stay.copy()
-    for signal in (0, 1):
-        table[:, :, signal] = best_response(auction, stay, signal)[:, :, signal]
-    return table
 
 
 def utility_loss(auction: Auction, sigma: np.ndarray) -> float:
@@ -282,7 +326,7 @@ def utility_loss(auction: Auction, sigma: np.ndarray) -> float:
     stay = anonymise(auction, sigma)
     loss = 0.0
     for signal in (0, 1):
-        prior = auction.q if signal == 1 else 1 - auction.q
+        prior = signal_weight(auction, signal)
         response = best_response(auction, stay, signal)
         loss += prior * (
             tagged_payoff(auction, stay, response, signal) - tagged_payoff(auction, stay, stay, signal)

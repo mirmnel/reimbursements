@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 
 import analysis as AN
 import solver as A
@@ -13,14 +12,13 @@ Q, C, TIGHT = 0.5, 0.025, 1e-9
 def target(reimbursement_policy, c=C, q=Q, **overrides):
     """The game under a reimbursement policy, and the equilibrium the paper targets in it."""
     auction = A.Auction(q=q, c=c, reimbursement_policy=reimbursement_policy, **overrides)
-    war = AN.war_of_attrition(c) if reimbursement_policy == "zero" else AN.SEPARATING
-    return auction, AN.profile(auction, war)
+    return auction, AN.profile(auction, AN.closed_form_strategy(reimbursement_policy, c))
 
 
 def schedule(auction, sigma, signal):
     """Stay probability of one signal type at each round, both bidders still active."""
     return [
-        sigma[auction.info_index[(0, (round_index, (0, 1)), signal)]] for round_index in range(auction.rounds)
+        sigma[auction.info_index[(0, auction.states[round_index], signal)]] for round_index in range(auction.rounds)
     ]
 
 
@@ -33,6 +31,18 @@ def test_cbar_is_the_root_the_paper_reports():
     assert abs(cbar - 0.108629 / 2) < 5e-7, cbar  # mean units halve every cost
     gap = lambda c: AN.PI["targeted"](c, Q) - AN.PI["zero"](c, Q)
     assert gap(cbar - 1e-4) > 0 > gap(cbar + 1e-4)  # the revenue difference changes sign exactly there
+
+
+def test_the_region_closes_differently_at_each_of_its_two_bounds():
+    """At the cost root the revenues tie, and at the incentive bound they do not, so one end is open."""
+    q = 0.9  # past 0.783, where the incentive bound is the lesser of the two
+    bound = AN.ic_bound(q)
+    margin = lambda c: AN.PI["targeted"](c, q) - max(AN.PI["zero"](c, q), AN.PI["full"](c, q))
+    assert margin(bound) > 0 and AN.region_claim(bound, q), bound  # separation holds at the bound itself
+    assert margin(AN.CBAR) < 1e-12 and not AN.region_claim(AN.CBAR, 0.5), AN.CBAR
+    # Past the incentive bound the formulas still favour the targeted rule, at a profile nobody plays.
+    past = (bound + AN.CBAR) / 2
+    assert margin(past) > 0 and not AN.region_claim(past, q), past
 
 
 def test_targeted_beats_full_by_exactly_two_q_c():
@@ -88,9 +98,9 @@ def test_endgame_is_knife_edge_and_the_opening_is_not():
     auction, sigma = target("zero")
     at = auction.info_index
     for round_index in (1, 3):  # sigma_1 and sigma_3 are interior
-        assert abs(A.counterfactual_gain(auction, sigma, at[(0, (round_index, (0, 1)), 1)])) < 1e-12, round_index
-    assert A.counterfactual_gain(auction, sigma, at[(0, (0, (0, 1)), 1)]) > 1e-6  # H strictly stays at p = 0
-    assert A.counterfactual_gain(auction, sigma, at[(0, (0, (0, 1)), 0)]) < -1e-6  # L strictly exits at p = 0
+        assert abs(A.counterfactual_gain(auction, sigma, at[(0, auction.states[round_index], 1)])) < 1e-12, round_index
+    assert A.counterfactual_gain(auction, sigma, at[(0, auction.root(), 1)]) > 1e-6  # H strictly stays at p = 0
+    assert A.counterfactual_gain(auction, sigma, at[(0, auction.root(), 0)]) < -1e-6  # L strictly exits at p = 0
 
 
 def test_opening_incentive_constraint_binds_at_one_minus_q_over_four():
@@ -98,7 +108,7 @@ def test_opening_incentive_constraint_binds_at_one_minus_q_over_four():
     for q in (0.25, 0.5, 0.75):
         for c in (AN.ic_bound(q) - 0.05, AN.ic_bound(q) + 0.05):
             auction, sigma = target("targeted", c=c, q=q)
-            position = auction.info_index[(0, (0, (0, 1)), 1)]
+            position = auction.info_index[(0, auction.root(), 1)]
             gain = A.counterfactual_gain(auction, sigma, position) / A.counterfactual_reach(auction, sigma)[position]
             assert abs(gain - (AN.ic_bound(q) - c)) < TIGHT
             assert (gain > 0) == (c < AN.ic_bound(q))
@@ -118,19 +128,6 @@ def test_ranking_against_no_reimbursement_fails_above_cbar():
     for c in (0.065, 0.075, 0.1):
         revenue = revenues(c, 0.5)
         assert revenue["zero"] > revenue["targeted"] > revenue["full"], (c, revenue)
-
-
-# --- solving ----------------------------------------------------------------
-
-
-def test_the_solver_recovers_the_war_of_attrition_and_its_revenue():
-    """The exact-gradient solver finds the war-of-attrition stay schedule, and the low type exiting."""
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    sigma = A.solve(auction)
-    assert np.allclose(schedule(auction, sigma, 1), [1, AN.sigma1(C), 1, AN.sigma3(C)], atol=1e-6)
-    assert np.allclose(schedule(auction, sigma, 0), 0.0, atol=1e-6)
-    assert AN.utility_loss(auction, sigma) < 1e-9 and AN.max_regret(auction, sigma) < 1e-9
-    assert abs(A.evaluate(auction, sigma).revenue - AN.PI["zero"](C, Q)) < 1e-9
 
 
 def main(namespace=None) -> int:

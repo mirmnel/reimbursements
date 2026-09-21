@@ -73,12 +73,12 @@ def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> f
     """Gain from staying rather than exiting at ``position``, weighted by opponent reach only."""
     if symmetric.applies(auction, sigma):
         gain, _ = symmetric.gains(auction, sigma)
-        _, (round_index, active), signal = auction.info_sets[position]
-        return float(gain[round_index, len(active), signal])
-    bidder, (round_index, _), signal = auction.info_sets[position]
+        _, state, signal = auction.info_sets[position]
+        return float(gain[auction.orbit_of_state[state], signal])
+    bidder, state, signal = auction.info_sets[position]
     base = sigma.copy()
     for other, earlier in auction.info_index.items():
-        if other[0] == bidder and other[2] == signal and other[1][0] < round_index:
+        if other[0] == bidder and other[2] == signal and other[1].round < state.round:
             base[earlier] = 1.0
     staying, exiting = base.copy(), base.copy()
     staying[position], exiting[position] = 1.0, 0.0
@@ -88,7 +88,7 @@ def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> f
 def counterfactual_reach(auction: Auction, sigma: np.ndarray) -> np.ndarray:
     """Prior times opponents' reach, the weight each ``counterfactual_gain`` carries."""
     if symmetric.applies(auction, sigma):
-        return symmetric.gains(auction, sigma)[1].ravel()[auction.anonymous_index]
+        return symmetric.gains(auction, sigma)[1].ravel()[auction.orbit_index]
     weights = np.zeros(len(auction.info_sets))
     for bidder in range(auction.n):
         forced = sigma.copy()
@@ -106,66 +106,10 @@ def counterfactual_reach(auction: Auction, sigma: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-SETTLED = 1e-12  # a utility loss at machine precision, past which more search cannot help
-
-
-def symmetry_groups(auction: Auction) -> Dict[Tuple[int, int, int], np.ndarray]:
-    """Information sets that exchangeable bidders must play identically, by round, count and signal."""
-    buckets: Dict[Tuple[int, int, int], List[int]] = {}
-    for position, (_, (round_index, active), signal) in enumerate(auction.info_sets):
-        buckets.setdefault((round_index, len(active), signal), []).append(position)
+def symmetry_groups(auction: Auction) -> Dict[Tuple[int, int], np.ndarray]:
+    """Information sets that exchangeable bidders must play identically, by orbit and signal."""
+    buckets: Dict[Tuple[int, int], List[int]] = {}
+    for position, (_, state, signal) in enumerate(auction.info_sets):
+        buckets.setdefault((auction.orbit_of_state[state], signal), []).append(position)
     return {bucket: np.array(positions) for bucket, positions in buckets.items()}
 
-
-def ascend(
-    auction: Auction, groups: Dict[Tuple[int, int, int], np.ndarray], sigma: np.ndarray, rate: float
-) -> np.ndarray:
-    """One step up the exact gradient of a bidder's payoff, clipped back to a probability."""
-    stay = symmetric.anonymise(auction, sigma)
-    gain, weights = symmetric.gains(auction, sigma, own=stay)
-    step = np.zeros_like(sigma)
-    for bucket, positions in groups.items():
-        step[positions] = gain[bucket] / weights[bucket] if weights[bucket] > 1e-12 else 0.0
-    return np.clip(sigma + rate * step, 0.0, 1.0)
-
-
-def climb(
-    auction: Auction, groups: Dict[Tuple[int, int, int], np.ndarray], sigma: np.ndarray,
-    iterations: int, rate: float,
-) -> np.ndarray:
-    """Ascend the gradient for a fixed number of steps."""
-    for _ in range(iterations):
-        sigma = ascend(auction, groups, sigma, rate)
-    return sigma
-
-
-def fictitious(
-    auction: Auction, groups: Dict[Tuple[int, int, int], np.ndarray], sigma: np.ndarray,
-    iterations: int, rate: float,
-) -> Tuple[np.ndarray, float]:
-    """Fictitious play, and the least utility loss of any profile it passes through."""
-    best, least = sigma, float("inf")
-    for iteration in range(iterations):
-        sigma = ascend(auction, groups, sigma, rate)
-        loss = symmetric.utility_loss(auction, sigma)
-        if loss < least:
-            best, least = sigma, loss
-        if least <= SETTLED:
-            break
-        stay = symmetric.anonymise(auction, sigma)
-        weight = 1.0 / (iteration + 2)
-        target = symmetric.best_responses(auction, stay)
-        sigma = symmetric.broadcast(auction, (1.0 - weight) * stay + weight * target)
-    return best, least
-
-
-def solve(auction: Auction, iterations: int = 200, rate: float = 1.0) -> np.ndarray:
-    """Exact-gradient solver, escaping by fictitious play where ascent alone stalls, per ADR-0006."""
-    # Default rate is calibrated to mean units, where gains are half their published size.
-    groups, uniform = symmetry_groups(auction), np.full(len(auction.info_sets), 0.5)
-    ascended = climb(auction, groups, uniform, iterations, rate)
-    if symmetric.utility_loss(auction, ascended) <= SETTLED:
-        return ascended
-    best, least = fictitious(auction, groups, uniform, iterations, rate)
-    settled = climb(auction, groups, best, iterations, rate)
-    return settled if symmetric.utility_loss(auction, settled) < least else best

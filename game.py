@@ -3,22 +3,90 @@
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Callable, Dict, List, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Mapping, NamedTuple, Sequence, Tuple, Union
 
 import numpy as np
 
-State = Tuple[int, Tuple[int, ...]]  # (round, active set)
+ACTIVE = -1  # exit round of a bidder that has not left
+
+
+class State(NamedTuple):
+    """A public bidding history: the round, who is still in, and the round each departed bidder left."""
+
+    round: int
+    active: Tuple[int, ...]
+    exits: Tuple[int, ...]  # per bidder, the round it exited in, or ``ACTIVE`` while it is still in
+
+
+Orbit = Tuple[int, Tuple[int, ...]]  # (round, multiset of the departed bidders' exit rounds)
 Info = Tuple[int, State, int]  # (bidder, state, own signal)
 Strategy = Callable[[State, int], float]  # Pr(stay) for one bidder
-ReimbursementPolicy = Callable[[int], float]  # round -> paid per stay
+ReimbursementPolicy = Callable[[State], float]  # public history -> paid per stay
+SignalPrior = Callable[[np.ndarray], np.ndarray]  # signal profiles -> probability of each
+
+PRIOR_TOLERANCE = 1e-12  # how far a prior may sit from a product of its marginals and still factorise
+COARSENING_TOLERANCE = 1e-12  # how far a policy may vary inside an orbit or a round and still coarsen onto it
+
+
+def independent(q: float) -> SignalPrior:
+    """Every bidder draws a high signal on its own, with probability ``q``."""
+    return lambda profiles: np.prod(np.where(profiles == 1, q, 1 - q), axis=1)
+
+
+def equicorrelated(q: float, rho: float) -> SignalPrior:
+    """Draw one signal for everyone with probability ``rho``, otherwise draw independently."""
+    # Every pair then correlates at exactly rho, and every bidder still draws high with probability q.
+    def prior(profiles: np.ndarray) -> np.ndarray:
+        high = profiles.sum(axis=1)
+        shared = np.where(high == profiles.shape[1], q, np.where(high == 0, 1 - q, 0.0))
+        return rho * shared + (1.0 - rho) * independent(q)(profiles)
+
+    return prior
+
+
+def opening(n: int) -> State:
+    """The history before anyone has acted, with every bidder still in."""
+    return State(0, tuple(range(n)), (ACTIVE,) * n)
+
+
+def after(state: State, stayers: Tuple[int, ...]) -> State:
+    """The history one round on, recording everyone who left this round as having left in it."""
+    staying = set(stayers)
+    exits = tuple(
+        state.round if bidder in state.active and bidder not in staying else exited
+        for bidder, exited in enumerate(state.exits)
+    )
+    return State(state.round + 1, stayers, exits)
+
+
+def bucket_constant(
+    index: np.ndarray, size: int, values: np.ndarray, tolerance: float = COARSENING_TOLERANCE
+) -> Union[np.ndarray, None]:
+    """One value per bucket where ``values`` is constant within every bucket, and ``None`` otherwise."""
+    totals = np.bincount(index, weights=values, minlength=size)
+    counts = np.bincount(index, minlength=size)
+    means = np.divide(totals, counts, out=np.zeros(size), where=counts > 0)
+    return means if np.max(np.abs(values - means[index])) <= tolerance else None
+
+
+def orbit_of(state: State) -> Orbit:
+    """What survives relabelling the bidders: the round and the multiset of exit rounds."""
+    return (state.round, tuple(sorted(exited for exited in state.exits if exited != ACTIVE)))
 
 
 def schedule(values: Sequence[float]) -> ReimbursementPolicy:
-    """A policy paying a set amount per round."""
+    """A policy paying a set amount per round, whatever the history within it."""
     paid = tuple(float(value) for value in values)
-    return lambda round_index: paid[round_index]
+    return lambda state: paid[state.round]
+
+
+def by_orbit(values: Mapping[Orbit, float]) -> ReimbursementPolicy:
+    """A policy paying a set amount per orbit, which is the finest public rule the reduction survives."""
+    paid = {orbit: float(value) for orbit, value in values.items()}
+    return lambda state: paid[orbit_of(state)]
 
 
 def flat(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
@@ -56,11 +124,19 @@ REIMBURSEMENT_POLICIES = tuple(PUBLISHED_REIMBURSEMENTS)
 
 
 def states(n: int, rounds: int) -> List[State]:
-    """Every state of a round and an active set of at least two bidders, reachable or not."""
-    active_sets = [
-        stayers for size in range(2, n + 1) for stayers in itertools.combinations(range(n), size)
-    ]
-    return sorted({(0, tuple(range(n)))} | {(t, active) for t in range(1, rounds) for active in active_sets})
+    """Every public history leaving at least two bidders active, in round order, reachable or not."""
+    frontier = [opening(n)]
+    every = list(frontier)
+    for _ in range(1, rounds):
+        onward = [
+            after(state, stayers)
+            for state in frontier
+            for size in range(2, len(state.active) + 1)
+            for stayers in itertools.combinations(state.active, size)
+        ]
+        frontier = onward
+        every += onward
+    return every
 
 
 @dataclass
@@ -73,8 +149,9 @@ class Auction:
     n: int = 2
     rounds: int = 4  # decision rounds
     delta: float = 0.25  # tick size
+    signal_prior: Union[SignalPrior, None] = None  # the joint law, defaulting to independent draws at q
 
-    # Tables below build on first use: active-set tables grow like 6^n, exhausting memory at n = 10.
+    # Tables below build on first use: history tables outgrow memory past seven bidders.
 
     @cached_property
     def profiles(self) -> np.ndarray:
@@ -83,8 +160,54 @@ class Auction:
 
     @cached_property
     def prior(self) -> np.ndarray:
-        """Probability of each signal profile."""
-        return np.prod(np.where(self.profiles == 1, self.q, 1 - self.q), axis=1)
+        """Probability of each signal profile, drawn jointly so that bidders may correlate."""
+        law = self.signal_prior if self.signal_prior is not None else independent(self.q)
+        prior = np.asarray(law(self.profiles), dtype=float)
+        if prior.shape != (self.num_profiles,):
+            raise ValueError(f"the signal prior gave {prior.shape} probabilities, not ({self.num_profiles},)")
+        if prior.min() < 0.0 or abs(prior.sum() - 1.0) > PRIOR_TOLERANCE:
+            raise ValueError(f"the signal prior is not a distribution: it sums to {prior.sum()!r}")
+        return prior
+
+    @cached_property
+    def marginals(self) -> np.ndarray:
+        """Each bidder's own probability of drawing a high signal, under the joint prior."""
+        return self.profiles.T @ self.prior
+
+    @cached_property
+    def independent_signals(self) -> bool:
+        """Whether the prior is independent draws at ``q``, which the published closed forms assume."""
+        product = independent(self.q)(self.profiles)
+        return bool(np.max(np.abs(self.prior - product)) <= PRIOR_TOLERANCE)
+
+    @cached_property
+    def exchangeable_signals(self) -> bool:
+        """Whether the prior survives relabelling the bidders, which the orbit reduction needs."""
+        # With binary signals that is exactly the prior depending on the high-signal count alone.
+        high = self.profiles.sum(1)
+        ways = np.array([math.comb(self.n, count) for count in high], dtype=float)
+        return bool(np.max(np.abs(self.prior - self.signal_counts[high] / ways)) <= PRIOR_TOLERANCE)
+
+    @cached_property
+    def signal_counts(self) -> np.ndarray:
+        """Probability that exactly ``k`` bidders drew a high signal, for ``k`` up to ``n``."""
+        return np.bincount(self.profiles.sum(1), weights=self.prior, minlength=self.n + 1)
+
+    @cached_property
+    def own_and_others(self) -> np.ndarray:
+        """(2, n) probability that a bidder drew each signal while ``k`` of the others drew high."""
+        others, own = self.profiles[:, 1:].sum(1), self.profiles[:, 0]
+        return np.array(
+            [
+                np.bincount(others[own == signal], weights=self.prior[own == signal], minlength=self.n)
+                for signal in (0, 1)
+            ]
+        )
+
+    @cached_property
+    def high_probability(self) -> float:
+        """A bidder's own probability of a high signal, which exchangeability makes common to all."""
+        return float(self.marginals[0])
 
     @property
     def num_profiles(self) -> int:
@@ -98,14 +221,14 @@ class Auction:
 
     @cached_property
     def states(self) -> List[State]:
-        """Every public state of the auction, reachable or not."""
+        """Every public history of the auction, reachable or not."""
         return states(self.n, self.rounds)
 
     @cached_property
     def info_sets(self) -> List[Info]:
-        """Every information set, one per active bidder, public state and own signal."""
+        """Every information set, one per active bidder, public history and own signal."""
         return [
-            (bidder, state, signal) for state in self.states for bidder in state[1] for signal in (0, 1)
+            (bidder, state, signal) for state in self.states for bidder in state.active for signal in (0, 1)
         ]
 
     @cached_property
@@ -114,12 +237,38 @@ class Auction:
         return {info_set: position for position, info_set in enumerate(self.info_sets)}
 
     @cached_property
-    def anonymous_index(self) -> np.ndarray:
-        """Each information set's slot in a flat (round, active count, signal) table."""
-        width = self.n + 1
-        return np.array(
-            [(round_index * width + len(active)) * 2 + signal for _, (round_index, active), signal in self.info_sets]
-        )
+    def orbits(self) -> List[Orbit]:
+        """Every orbit of the histories under relabelling the bidders, in round order."""
+        return list(dict.fromkeys(orbit_of(state) for state in self.states))
+
+    @cached_property
+    def orbit_of_state(self) -> Dict[State, int]:
+        """Each history's orbit, as a position in ``orbits``."""
+        at = {orbit: position for position, orbit in enumerate(self.orbits)}
+        return {state: at[orbit_of(state)] for state in self.states}
+
+    @cached_property
+    def orbit_index(self) -> np.ndarray:
+        """Each information set's slot in a flat (orbit, signal) table."""
+        return np.array([self.orbit_of_state[state] * 2 + signal for _, state, signal in self.info_sets])
+
+    @cached_property
+    def orbit_active(self) -> np.ndarray:
+        """How many bidders are still in, per orbit."""
+        return np.array([self.n - len(departed) for _, departed in self.orbits])
+
+    @cached_property
+    def onward_orbit(self) -> np.ndarray:
+        """(|orbits|, n + 1) orbit reached when ``k`` of the active bidders leave, or -1 where it ends."""
+        at = {orbit: position for position, orbit in enumerate(self.orbits)}
+        table = np.full((len(self.orbits), self.n + 1), -1, dtype=np.int64)
+        for position, (round_index, departed) in enumerate(self.orbits):
+            active = self.n - len(departed)
+            for leaving in range(active - 1):  # two or more must stay for the auction to carry on
+                if round_index + 1 < self.rounds:
+                    onward = (round_index + 1, tuple(sorted(departed + (round_index,) * leaving)))
+                    table[position, leaving] = at[onward]
+        return table
 
     @cached_property
     def gather(self) -> Dict[State, np.ndarray]:
@@ -130,7 +279,7 @@ class Auction:
                     np.array([self.info_index[(bidder, state, 0)], self.info_index[(bidder, state, 1)]])[
                         self.profiles[:, bidder]
                     ]
-                    for bidder in state[1]
+                    for bidder in state.active
                 ],
                 axis=1,
             )
@@ -158,14 +307,42 @@ class Auction:
 
     @cached_property
     def reimburses(self) -> ReimbursementPolicy:
-        """Reimbursement paid per stay in a round, from a published name if a name was given."""
+        """Reimbursement paid per stay at a history, from a published name if a name was given."""
         if callable(self.reimbursement_policy):
             return self.reimbursement_policy
         return PUBLISHED_REIMBURSEMENTS[self.reimbursement_policy](self.c, self.rounds)
 
+    @cached_property
+    def paid_by_state(self) -> np.ndarray:
+        """What the policy pays per stay at each public history, aligned with ``states``."""
+        return np.array([float(self.reimburses(state)) for state in self.states])
+
+    @cached_property
+    def orbit_view(self) -> Union[np.ndarray, None]:
+        """What the policy pays per orbit, or ``None`` where it separates histories inside one."""
+        index = np.array([self.orbit_of_state[state] for state in self.states])
+        return bucket_constant(index, len(self.orbits), self.paid_by_state)
+
+    @cached_property
+    def orbit_measurable(self) -> bool:
+        """Whether the policy pays the same at every history of an orbit, which the reduction needs."""
+        return self.orbit_view is not None
+
+    @cached_property
+    def orbit_reimburses(self) -> np.ndarray:
+        """What the policy pays per stay at each orbit, which needs it constant within one."""
+        if self.orbit_view is None:
+            raise ValueError("this reimbursement policy separates histories in one orbit, so it has no orbit view")
+        return self.orbit_view
+
+    def release_history_tables(self) -> None:
+        """Drop the per-history tables, which rebuild on demand and cost half a gigabyte at six bidders."""
+        for table in ("branch_tables", "gather"):
+            self.__dict__.pop(table, None)
+
     def root(self) -> State:
-        """The opening state: round ``0`` with every bidder active."""
-        return (0, tuple(range(self.n)))
+        """The opening history: round ``0``, with every bidder still in."""
+        return opening(self.n)
 
 
 @dataclass
@@ -187,8 +364,8 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
     """Per state, the fixed part of a round's payoff and the states it can lead to."""
     branch_payoffs, continuations = {}, {}
     for state in auction.states:
-        round_index, active = state
-        paid = auction.reimburses(round_index)
+        round_index, active = state.round, state.active
+        paid = auction.reimburses(state)
         payoff_by_mask = np.zeros((1 << len(active), auction.num_profiles, auction.n + 3))
         continuations[state] = []
         for mask in range(1 << len(active)):
@@ -199,7 +376,7 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
                 payoff[:, auction.n + 1] += paid
                 payoff[:, auction.n + 2] += 1.0
             if len(stayers) >= 2 and round_index + 1 < auction.rounds:
-                continuations[state].append((mask, (round_index + 1, stayers)))
+                continuations[state].append((mask, after(state, stayers)))
             else:  # sole stayer wins at p_t, all-exit splits at p_t, survivors split at p_T
                 winners = stayers or active
                 price = auction.price(auction.rounds if len(stayers) >= 2 else round_index)
