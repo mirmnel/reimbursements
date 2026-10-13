@@ -4,28 +4,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-import analysis
-from solver import evaluate, reach, symmetry_groups
-from game import Auction, State
+from . import game
+from .exact import CERTIFIED, RESOLVED, evaluate, reach, utility_loss
+from .game import Auction, State, payoff_scale
 
 
 EXIT, STAY = 0, 1
 
-INITIAL_REGRET = 0.05  # width of the interval initial regrets are drawn from, one draw per seed
+INITIAL_REGRET = 0.1  # width of the interval initial regrets are drawn from at two bidders, one draw per seed
 ITERATIONS = 2000
 TRACE_EVERY = 20
 TREMBLE = 0.01  # uniform mass mixed into a sampled opponent action, during training only
 
 BUDGET = 40_000  # iterations a validation run gets, where the utility loss bottoms.
-CALIBRATED_Q = (0.5,)  # the one signal probability the budget is measured at, and no other.
 
-BELIEF_TREMBLE = 0.01  # rate the off-path beliefs are trembled at when scoring, not a training device
 STAY_BAR = 0.06  # how far an on-path stay probability may sit from the closed form.
-REVENUE_BAR = 0.01  # the same bar on seller net revenue, in mean units
+REVENUE_BAR = 0.02  # the same bar on seller net revenue, at two bidders
 
 
 @dataclass
@@ -60,17 +58,16 @@ def averaged(strategy_sum: np.ndarray, regret: np.ndarray) -> np.ndarray:
 
 def shared_cells(auction: Auction) -> np.ndarray:
     """Each information set's cell in one shared table, being its orbit under relabelling the bidders."""
-    cells = np.empty(len(auction.info_sets), dtype=np.int64)
-    for cell, positions in enumerate(symmetry_groups(auction).values()):
-        cells[positions] = cell
-    return cells
+    buckets: Dict[Tuple[int, int], int] = {}
+    keys = [(auction.orbit_of_state[state], signal) for _, state, signal in auction.info_sets]
+    return np.array([buckets.setdefault(key, len(buckets)) for key in keys])
 
 
 def solve(
     auction: Auction,
     seed: int = 0,
     iterations: int = ITERATIONS,
-    initial_regret: float = INITIAL_REGRET,
+    initial_regret: Optional[float] = None,
     trace_every: int = TRACE_EVERY,
     tremble: float = TREMBLE,
     symmetry_restricted: bool = False,
@@ -79,6 +76,8 @@ def solve(
     # Restricted, every bidder reads and writes one shared table, so the search is symmetric by
     # construction rather than a finished profile being averaged. Unrestricted, each has its own.
     rng = np.random.default_rng(seed)
+    if initial_regret is None:
+        initial_regret = INITIAL_REGRET * payoff_scale(auction.n)
     index = auction.info_index
     cells = shared_cells(auction) if symmetry_restricted else np.arange(len(auction.info_sets))
     cell_of = cells.tolist()  # plain ints, which the traversal indexes with far more cheaply
@@ -162,29 +161,26 @@ class Score:
 
     verdict: Verdict
     utility_loss: float  # exact, by best response over the tree, never reading a regret table
-    one_shot_gain: float  # largest single-action deviation gain, at the sets the profile reaches
-    trembled_gain: float  # the same with the off-path sets weighted under a trembled belief
     on_path_distance: float  # furthest a stay probability sits from the closed form, where the target plays
     off_path_distance: float  # the same where it does not, which no budget informs and no bar reads
-    revenue: float  # seller net revenue, in mean units
+    revenue: float  # seller net revenue
     revenue_distance: float  # how far that sits from the closed form of this auction's rule
 
 
 def closed_forms(auction: Auction) -> Tuple[np.ndarray, float]:
     """The two-bidder example's closed-form profile and seller net revenue under this auction's rule."""
-    if (auction.n, auction.rounds, auction.delta) != (2, 4, 0.25):
+    if (auction.n, auction.rounds, auction.delta) != (2, 4, 0.5):
         raise ValueError(
             f"the closed forms describe the two-bidder example, not {auction.n} bidders over "
             f"{auction.rounds} rounds at a tick of {auction.delta}"
         )
     rule = auction.reimbursement_policy
-    if rule not in analysis.PI:
+    if rule not in game.PI:
         raise ValueError(f"no closed form for the reimbursement policy {rule!r}")
     if not auction.independent_signals:
         raise ValueError("the published closed forms assume independent signals, so a correlated prior has none")
-    # Mean-unit forms throughout, so analysis.PUBLISHED is not what anything here is scored against.
-    derived = analysis.profile(auction, analysis.closed_form_strategy(rule, auction.c))
-    return derived, analysis.PI[rule](auction.c, auction.q)
+    derived = game.profile(auction, game.closed_form_strategy(rule, auction.c))
+    return derived, game.PI[rule](auction.c, auction.q)
 
 
 def stay_schedule(auction: Auction, sigma: np.ndarray) -> Dict[str, float]:
@@ -216,21 +212,20 @@ def visit_probability(auction: Auction, sigma: np.ndarray) -> np.ndarray:
 def score(
     auction: Auction,
     sigma: np.ndarray,
-    belief_tremble: float = BELIEF_TREMBLE,
     stay_bar: float = STAY_BAR,
     revenue_bar: float = REVENUE_BAR,
 ) -> Score:
     """Judge a behaviour profile against the closed forms, by a path that never reads a regret table."""
     derived, earnings = closed_forms(auction)
-    loss = float(analysis.utility_loss(auction, sigma))
+    loss = float(utility_loss(auction, sigma))
     # Measured where the target plays, as the paper's on-path distance. Off the path the closed form
-    # is an arbitrary tie-break the run has no experience of, so trembled_gain judges there instead.
-    on_path = visit_probability(auction, derived) > analysis.RESOLVED
+    # is an arbitrary tie-break the run has no experience of.
+    on_path = visit_probability(auction, derived) > RESOLVED
     distance = np.abs(sigma - derived)
     on_path_distance, off_path_distance = float(distance[on_path].max()), float(distance[~on_path].max())
     revenue = evaluate(auction, sigma).revenue
     revenue_distance = abs(revenue - earnings)
-    if loss > analysis.CERTIFIED:
+    if loss > CERTIFIED:
         verdict = Verdict.UNSOLVED
     elif on_path_distance <= stay_bar and revenue_distance <= revenue_bar:
         verdict = Verdict.DERIVED
@@ -239,8 +234,6 @@ def score(
     return Score(
         verdict=verdict,
         utility_loss=loss,
-        one_shot_gain=float(analysis.max_regret(auction, sigma)),
-        trembled_gain=float(analysis.trembled_regret(auction, sigma, belief_tremble)),
         on_path_distance=on_path_distance,
         off_path_distance=off_path_distance,
         revenue=revenue,

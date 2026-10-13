@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import numpy as np
 
-import implement as I
-import symmetric as S
-from game import Auction
+from auction import implement as I
+from auction import symmetric as S
+from auction.game import Auction
 from test_game import random_symmetric
 from test_paper import main
 
-C, TIGHT = 0.025, 1e-12
+C, TIGHT = 0.05, 1e-12
 
 
 def costly(n=3, c=C, rounds=4, **overrides):
     """The costly auction the program writes a rule for, whose own policy it never reads."""
-    settings = {"reimbursement_policy": "full", "delta": 1.0 / rounds} | overrides
+    settings = {"reimbursement_policy": "full", "delta": n / rounds} | overrides
     return Auction(n=n, c=c, rounds=rounds, **settings)
 
 
@@ -32,13 +32,6 @@ def test_the_objective_is_the_reimbursement_the_reduction_already_reports():
         for refunds in (np.full(len(auction.orbits), C), rng.uniform(0.0, C, len(auction.orbits))):
             want = S.outcome(auction, sigma, refunds).reimbursement
             assert abs(float(mass @ refunds) - want) < TIGHT, (n, want)
-
-
-def test_the_stays_the_objective_counts_are_the_stay_rounds_the_outcome_reports():
-    """Summed over the orbits, the objective's weights are the expected staying bidder-rounds."""
-    auction = costly(n=4)
-    sigma = random_symmetric(auction, 5)
-    assert abs(I.stay_mass(auction, sigma).sum() - S.outcome(auction, sigma).stay_rounds) < TIGHT
 
 
 def test_the_gain_coefficients_reproduce_the_gain_at_a_rule_they_never_saw():

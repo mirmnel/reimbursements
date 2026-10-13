@@ -1,4 +1,4 @@
-"""Game objects: the state space, the parameterised auction, and a solved outcome."""
+"""The state space, the parameterised auction, a solved outcome, and the two-bidder closed forms."""
 
 from __future__ import annotations
 
@@ -45,6 +45,11 @@ def equicorrelated(q: float, rho: float) -> SignalPrior:
         return rho * shared + (1.0 - rho) * independent(q)(profiles)
 
     return prior
+
+
+def payoff_scale(n: int) -> float:
+    """How far payoffs stretch against the two-bidder example, the common value summing ``n`` signals."""
+    return n / 2
 
 
 def opening(n: int) -> State:
@@ -99,23 +104,7 @@ def targeted(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolic
     return schedule([0.0] + [fraction * c] * (rounds - 1))
 
 
-def front_loaded(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
-    """Reimburse most in the opening round and least in the last, down a linear ramp."""
-    return schedule([fraction * c * (rounds - round_index) / rounds for round_index in range(rounds)])
-
-
-def back_loaded(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
-    """Reimburse least in the opening round and most in the last, up a linear ramp."""
-    return schedule([fraction * c * (round_index + 1) / rounds for round_index in range(rounds)])
-
-
-REIMBURSEMENT_FAMILIES = {
-    "flat": flat,
-    "targeted": targeted,
-    "front_loaded": front_loaded,
-    "back_loaded": back_loaded,
-}
-PUBLISHED_REIMBURSEMENTS = {  # the paper's three rules, as members of the schedule family
+PUBLISHED_REIMBURSEMENTS = {
     "zero": lambda c, rounds: flat(c, rounds, 0.0),
     "full": flat,
     "targeted": targeted,
@@ -144,11 +133,11 @@ class Auction:
     """A fully specified costly clock auction, defaulting to the paper's two-bidder example."""
 
     q: float = 0.5  # Pr(s_i = 1)
-    c: float = 0.025  # participation cost per stay
+    c: float = 0.05  # participation cost per stay
     reimbursement_policy: Union[str, ReimbursementPolicy] = "targeted"  # a schedule, or a published name
     n: int = 2
     rounds: int = 4  # decision rounds
-    delta: float = 0.25  # tick size
+    delta: float = 0.5  # tick size
     signal_prior: Union[SignalPrior, None] = None  # the joint law, defaulting to independent draws at q
 
     # Tables below build on first use: history tables outgrow memory past seven bidders.
@@ -216,8 +205,8 @@ class Auction:
 
     @cached_property
     def value(self) -> np.ndarray:
-        """Common value in mean units under each signal profile, shared by every bidder."""
-        return self.profiles.mean(1)
+        """Common value under each signal profile, the sum of the signals as in the paper."""
+        return self.profiles.sum(1).astype(float)
 
     @cached_property
     def states(self) -> List[State]:
@@ -352,7 +341,6 @@ class Outcome:
     payoff: np.ndarray  # (n,) bidder payoffs
     price: float
     reimbursement: float
-    stay_rounds: float  # expected number of staying bidder-rounds
 
     @property
     def revenue(self) -> float:
@@ -366,7 +354,7 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
     for state in auction.states:
         round_index, active = state.round, state.active
         paid = auction.reimburses(state)
-        payoff_by_mask = np.zeros((1 << len(active), auction.num_profiles, auction.n + 3))
+        payoff_by_mask = np.zeros((1 << len(active), auction.num_profiles, auction.n + 2))
         continuations[state] = []
         for mask in range(1 << len(active)):
             stayers = tuple(bidder for position, bidder in enumerate(active) if mask >> position & 1)
@@ -374,7 +362,6 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
             for bidder in stayers:
                 payoff[:, bidder] -= auction.c - paid
                 payoff[:, auction.n + 1] += paid
-                payoff[:, auction.n + 2] += 1.0
             if len(stayers) >= 2 and round_index + 1 < auction.rounds:
                 continuations[state].append((mask, after(state, stayers)))
             else:  # sole stayer wins at p_t, all-exit splits at p_t, survivors split at p_T
@@ -386,3 +373,56 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
         branch_payoffs[state] = payoff_by_mask
     return branch_payoffs, continuations
 
+
+
+# ---------------------------------------------------------------------------
+# The two-bidder example's closed forms and the strategies they are stated at
+# ---------------------------------------------------------------------------
+
+sigma1 = lambda c: 1 - 4 * c / 3
+sigma3 = lambda c: 1 - 4 * c
+R0 = lambda c: 0.5 * (1 - sigma1(c) ** 2) + sigma1(c) ** 2 * (1.5 + 0.5 * sigma3(c) ** 2)
+L0 = lambda q: 8 * q**2 + 2 * q * (1 - q)  # expected staying bidder-rounds, frictionless
+PI = {
+    "zero": lambda c, q: q**2 * R0(c),
+    "full": lambda c, q: 2 * q**2 - c * L0(q),
+    "targeted": lambda c, q: 2 * q**2 * (1 - 3 * c),
+}
+ic_bound = lambda q: (1 - q) / 2  # r^T preserves separation iff c <= (1-q)/2
+
+# The root of 64c^3 - 128c^2 + 96c - 9 below one quarter, published as 0.108629.
+# Frozen because root finding drifts by an ulp between builds and this number reaches the results.
+CBAR = 0.10862915340160972
+
+
+def region(q: float) -> float:
+    """The cost bound below which the targeted policy beats both comparison policies."""
+    return min(CBAR, ic_bound(q))
+
+
+def region_claim(c: float, q: float) -> bool:
+    """Whether the theory puts the targeted policy ahead of both comparisons at this cost."""
+    # Strict at the cost root, where the revenues tie, and inclusive at the incentive bound, where
+    # separation still holds.
+    return 0.0 < c < CBAR and c <= ic_bound(q)
+
+
+def profile(auction: Auction, *strategies: Strategy) -> np.ndarray:
+    """Flat behaviour profile from one strategy per bidder, or from one shared by all."""
+    if len(strategies) == 1:
+        strategies *= auction.n
+    return np.array([float(strategies[bidder](state, signal)) for (bidder, state, signal) in auction.info_sets])
+
+
+SEPARATING: Strategy = lambda state, signal: float(signal == 1)  # L exits at p = 0, H stays
+
+
+def war_of_attrition(c: float) -> Strategy:
+    """The low type exits everywhere, and the high type stays at the opening and then mixes."""
+    schedule = (1.0, sigma1(c), 1.0, sigma3(c))
+    return lambda state, signal: schedule[state[0]] if signal == 1 else 0.0
+
+
+def closed_form_strategy(rule: str, c: float) -> Strategy:
+    """The strategy the two-bidder example derives under one published reimbursement rule."""
+    return war_of_attrition(c) if rule == "zero" else SEPARATING

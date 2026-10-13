@@ -8,9 +8,9 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from scipy.optimize import linprog
 
-import symmetric
-from analysis import CERTIFIED, RESOLVED, one_shot_regret
-from game import Auction, ReimbursementPolicy, by_orbit
+from . import symmetric
+from .exact import RESOLVED, certified
+from .game import Auction, ReimbursementPolicy, by_orbit
 
 
 BELIEF_TREMBLE = 0.01  # rate the off-path beliefs are trembled at, so every orbit carries a constraint
@@ -20,7 +20,7 @@ BELIEF_TREMBLE = 0.01  # rate the off-path beliefs are trembled at, so every orb
 # orders of magnitude at six bidders and the program came back infeasible.
 MIXED_FLOOR = 1e-6
 # Paying in full satisfies every constraint with equality on the ones that bind, so the feasible set
-# touches it at a vertex and floating point can put it just outside. Far below analysis.CERTIFIED.
+# touches it at a vertex and floating point can put it just outside. Far below exact.CERTIFIED.
 FEASIBILITY_MARGIN = 1e-9
 
 
@@ -34,6 +34,11 @@ class Implementation:
     slack: float  # how far from optimal a prescribed action was allowed to sit
     constraints: int  # sequential-rationality constraints the program carried
     status: str
+
+
+def one_shot_regret(gain: float, stay_prob: float) -> float:
+    """What mixing at ``stay_prob`` costs against taking the better of the two actions outright."""
+    return (1 - stay_prob) * max(gain, 0.0) + stay_prob * max(-gain, 0.0)
 
 
 def stay_mass(auction: Auction, sigma: np.ndarray) -> np.ndarray:
@@ -85,7 +90,7 @@ def sequential_rationality(
             normalised, slopes = constant / weight, coefficient / weight
             at_full = one_shot_regret(normalised + slopes @ full, stay[orbit, signal])
             allowed[orbit, signal] = max(floor, at_full) + FEASIBILITY_MARGIN
-            # analysis.one_shot_regret at this set stays inside the allowance exactly on this pair.
+            # one_shot_regret at this set stays inside the allowance exactly on this pair.
             for sign, mixed in ((1.0, 1.0 - stay[orbit, signal]), (-1.0, stay[orbit, signal])):
                 if mixed > MIXED_FLOOR:
                     rows.append(sign * slopes)
@@ -94,10 +99,12 @@ def sequential_rationality(
 
 
 def minimum_cost(
-    auction: Auction, sigma: np.ndarray, floor: float = CERTIFIED, tremble: float = BELIEF_TREMBLE
+    auction: Auction, sigma: np.ndarray, floor: Optional[float] = None, tremble: float = BELIEF_TREMBLE
 ) -> Implementation:
     """Solve for the cheapest per-orbit reimbursement leaving every action the target prescribes optimal."""
     symmetric.requires_exchangeability(auction)
+    if floor is None:
+        floor = certified(auction.n)
     objective = stay_mass(auction, sigma)
     rows, bounds, allowed = sequential_rationality(auction, sigma, floor, tremble)
     solution = linprog(objective, A_ub=rows, b_ub=bounds, bounds=(0.0, auction.c), method="highs")

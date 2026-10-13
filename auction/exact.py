@@ -1,13 +1,21 @@
-"""Exact evaluation and the exact-gradient solver for the costly Japanese clock auction."""
+"""Exact evaluation of a profile, and the exact best response that certifies it as an equilibrium."""
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict
 
 import numpy as np
 
-import symmetric
-from game import REIMBURSEMENT_POLICIES, Auction, Outcome, State
+from . import symmetric
+from .game import REIMBURSEMENT_POLICIES, Auction, Outcome, State, payoff_scale
+
+CERTIFIED = 1e-3  # the paper's epsilon: the utility loss a certified two-bidder profile clears
+RESOLVED = 1e-12  # the least counterfactual reach a gain can be divided by without amplifying noise
+
+
+def certified(n: int = 2) -> float:
+    """``CERTIFIED`` at ``n`` bidders, stretched with the payoffs so every count is held to one bar."""
+    return CERTIFIED * payoff_scale(n)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +53,6 @@ def evaluate(auction: Auction, sigma: np.ndarray) -> Outcome:
         expected[: auction.n],
         float(expected[auction.n]),
         float(expected[auction.n + 1]),
-        float(expected[auction.n + 2]),
     )
 
 
@@ -85,31 +92,28 @@ def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> f
     return float(evaluate(auction, staying).payoff[bidder] - evaluate(auction, exiting).payoff[bidder])
 
 
-def counterfactual_reach(auction: Auction, sigma: np.ndarray) -> np.ndarray:
-    """Prior times opponents' reach, the weight each ``counterfactual_gain`` carries."""
+# ---------------------------------------------------------------------------
+# Best responses and equilibrium quality
+# ---------------------------------------------------------------------------
+
+
+def best_response(auction: Auction, sigma: np.ndarray, bidder: int) -> np.ndarray:
+    """Exact best response of ``bidder``, by one backward sweep on ``counterfactual_gain``."""
+    response = sigma.copy()
+    for position in reversed(range(len(auction.info_sets))):  # round-sorted, so this sweeps backwards
+        if auction.info_sets[position][0] == bidder:
+            gain = counterfactual_gain(auction, response, position)
+            response[position] = float(gain > 0.0)
+    return response
+
+
+def utility_loss(auction: Auction, sigma: np.ndarray) -> float:
+    """Utility loss: the largest gain any bidder gets from a full best response."""
     if symmetric.applies(auction, sigma):
-        return symmetric.gains(auction, sigma)[1].ravel()[auction.orbit_index]
-    weights = np.zeros(len(auction.info_sets))
-    for bidder in range(auction.n):
-        forced = sigma.copy()
-        forced[[position for info_set, position in auction.info_index.items() if info_set[0] == bidder]] = 1.0
-        reached = reach(auction, forced)
-        for position, info_set in enumerate(auction.info_sets):
-            if info_set[0] == bidder:
-                weights[position] = float(
-                    np.where(auction.profiles[:, bidder] == info_set[2], auction.prior, 0.0) @ reached[info_set[1]]
-                )
-    return weights
-
-# ---------------------------------------------------------------------------
-# Solving
-# ---------------------------------------------------------------------------
-
-
-def symmetry_groups(auction: Auction) -> Dict[Tuple[int, int], np.ndarray]:
-    """Information sets that exchangeable bidders must play identically, by orbit and signal."""
-    buckets: Dict[Tuple[int, int], List[int]] = {}
-    for position, (_, state, signal) in enumerate(auction.info_sets):
-        buckets.setdefault((auction.orbit_of_state[state], signal), []).append(position)
-    return {bucket: np.array(positions) for bucket, positions in buckets.items()}
+        return symmetric.utility_loss(auction, sigma)
+    baseline = evaluate(auction, sigma).payoff
+    return max(
+        evaluate(auction, best_response(auction, sigma, bidder)).payoff[bidder] - baseline[bidder]
+        for bidder in range(auction.n)
+    )
 

@@ -3,21 +3,7 @@ name = "auctionrl"
 version = "0.1.0"
 description = "Exact and emergent equilibria in the costly Japanese clock auction with reimbursements"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "scipy>=1.11"]
+dependencies = ["numpy>=1.24", "scipy>=1.11", "matplotlib>=3.7"]
 
 [tool.setuptools]
-py-modules = [
-    "analysis",
-    "calibrate",
-    "emergence",
-    "game",
-    "implement",
-    "learning",
-    "mccfr",
-    "robustness",
-    "scale",
-    "solver",
-    "symmetric",
-    "validate",
-    "verify",
-]
+packages = ["auction", "experiments"]

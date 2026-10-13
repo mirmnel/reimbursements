@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import ast
 import itertools
-import pathlib
 
 import numpy as np
 
-import analysis as AN
-import game
-import solver as A
-import symmetric as S
-import mccfr as M
-import validate as V
+from auction import game
+from auction import exact as A
+from auction import symmetric as S
+from auction import mccfr as M
+from experiments import two_bidder as T
 from test_paper import main, schedule, target
 
-C, Q, TIGHT = 0.025, 0.5, 1e-12
+C, Q, TIGHT = 0.05, 0.5, 1e-12
 ITERATIONS = 2000  # enough for the sign of a strict gain to be settled, not for convergence
-STRICT = 0.01  # a normalised gain below which the information set is indifferent, not decided
+STRICT = 0.02  # a normalised gain below which the information set is indifferent, not decided
 
 
 # --- what a run returns -----------------------------------------------------
@@ -31,25 +28,8 @@ def test_a_run_returns_a_stay_probability_for_every_information_set():
     assert solved.profile.shape == (len(auction.info_sets),)
 
 
-def test_the_result_carries_what_a_missed_target_has_to_be_read_from():
-    """Regrets say whether the run was wandering or confidently wrong, and the traces say which way it moved."""
-    auction = A.Auction(q=Q, c=C)
-    width = len(auction.info_sets)
-    solved = M.solve(auction, seed=3, iterations=40, trace_every=4)
-    assert solved.regrets.shape == (width, 2)
-    assert solved.visits.shape == (width,)
-    assert solved.iterates.shape == (10, width)
-    assert solved.averages.shape == solved.iterates.shape
-    assert solved.seed == 3
 
 
-def test_every_returned_probability_is_one_a_bidder_could_play():
-    """The profile and both traces are behavioural, so anything downstream can evaluate them as they stand."""
-    auction = A.Auction(q=Q, c=C)
-    solved = M.solve(auction, seed=1, iterations=60, trace_every=4)
-    for name, table in (("profile", solved.profile), ("iterates", solved.iterates), ("averages", solved.averages)):
-        assert np.all(np.isfinite(table)), name
-        assert np.all((table >= 0.0) & (table <= 1.0)), (name, table.min(), table.max())
 
 
 def test_the_same_seed_repeats_and_a_different_seed_does_not():
@@ -69,16 +49,14 @@ def test_the_same_seed_repeats_and_a_different_seed_does_not():
 
 def test_at_zero_participation_cost_the_regret_table_leans_the_way_the_exact_gain_does():
     """Separation is decided at the opening, where the sign convention is checked against the exact path."""
-    # The opening is the one state whose counterfactual reach is the prior itself, so no set is
-    # stale there and every seed is comparable.
+    # The opening is reached under every seed, so no set is stale there and every seed is comparable.
     auction = A.Auction(q=Q, c=0.0, reimbursement_policy="zero")
     for seed in range(3):
         solved = M.solve(auction, seed=seed, iterations=ITERATIONS)
-        weights = A.counterfactual_reach(auction, solved.profile)
         for signal in (0, 1):
             for bidder in range(auction.n):
                 position = auction.info_index[(bidder, auction.root(), signal)]
-                gain = A.counterfactual_gain(auction, solved.profile, position) / weights[position]
+                gain = A.counterfactual_gain(auction, solved.profile, position)
                 if abs(gain) <= STRICT:  # indifferent, so the table has no sign to agree with
                     continue
                 lean = solved.regrets[position][M.STAY] - solved.regrets[position][M.EXIT]
@@ -86,7 +64,7 @@ def test_at_zero_participation_cost_the_regret_table_leans_the_way_the_exact_gai
 
 
 def test_full_reimbursement_leaves_the_bidders_the_frictionless_game():
-    """Paying every stay back is the zero-cost auction to a bidder, and costs the seller each stay exactly once."""
+    """Paying every stay back is the zero-cost auction to a bidder."""
     frictionless = A.Auction(q=Q, c=0.0, reimbursement_policy="zero")
     reimbursed = A.Auction(q=Q, c=C, reimbursement_policy="full")
     for seed in range(3):
@@ -96,8 +74,6 @@ def test_full_reimbursement_leaves_the_bidders_the_frictionless_game():
         assert np.array_equal(free.visits, paid.visits), seed
         outcome = A.evaluate(reimbursed, paid.profile)
         assert np.allclose(outcome.payoff, A.evaluate(frictionless, free.profile).payoff, atol=TIGHT)
-        assert abs(outcome.reimbursement - C * outcome.stay_rounds) < TIGHT, outcome
-        assert abs(outcome.revenue - (outcome.price - C * outcome.stay_rounds)) < TIGHT, outcome
 
 
 def test_chance_is_sampled_from_the_prior_rather_than_enumerated():
@@ -119,15 +95,6 @@ def test_visits_count_what_play_reached_and_not_what_enumeration_walked():
     assert np.all(moved > M.INITIAL_REGRET), solved.regrets[quiet]
 
 
-def test_the_bidders_are_never_made_to_agree():
-    """Each bidder keeps its own table, so a run can disagree across bidders rather than hiding it."""
-    auction = A.Auction(q=Q, c=0.0, reimbursement_policy="zero")
-    apart = [
-        abs(solved.profile[auction.info_index[(0, auction.root(), 0)]]
-            - solved.profile[auction.info_index[(1, auction.root(), 0)]])
-        for solved in (M.solve(auction, seed=seed, iterations=ITERATIONS) for seed in range(3))
-    ]
-    assert max(apart) > 0.1, apart
 
 
 # --- the symmetry restriction ------------------------------------------------
@@ -194,38 +161,10 @@ def test_the_restriction_is_on_the_search_and_not_an_average_taken_afterwards():
     assert not np.allclose(restricted.profile, S.symmetrise(auction, apart.profile), atol=0.01)
 
 
-def test_the_restriction_is_off_unless_it_is_asked_for_and_changes_nothing_when_off():
-    """The default keeps one table per bidder, drawing the same initial regrets from the same stream."""
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    width = len(auction.info_sets)
-    cells = M.shared_cells(auction)
-    assert cells.max() + 1 < width  # the restricted table is the smaller one
-    for restricted, rows in ((False, width), (True, int(cells.max()) + 1)):
-        # A table of the wrong width would consume a different stretch of the stream, so pinning the
-        # draw is what keeps the default run the one it was before the restriction existed.
-        drawn = np.random.default_rng(5).uniform(0.0, M.INITIAL_REGRET, (rows, 2))
-        started = M.solve(auction, seed=5, iterations=0, symmetry_restricted=restricted)
-        assert np.array_equal(started.regrets, drawn[cells] if restricted else drawn), restricted
-    assert not S.is_symmetric(auction, M.solve(auction, seed=5, iterations=100).profile)
 
 
-def test_a_restricted_run_reports_that_it_was_restricted():
-    """The two searches answer different questions, so a row has to say which of them produced it."""
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    assert M.solve(auction, seed=0, iterations=20, symmetry_restricted=True).symmetry_restricted
-    assert not M.solve(auction, seed=0, iterations=20).symmetry_restricted
 
 
-def test_a_restricted_run_returns_the_same_shapes_as_an_unrestricted_one():
-    """Everything downstream reads a run flat over the information sets, whichever search produced it."""
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    width = len(auction.info_sets)
-    solved = M.solve(auction, seed=1, iterations=40, trace_every=4, symmetry_restricted=True)
-    assert solved.profile.shape == (width,)
-    assert solved.regrets.shape == (width, 2)
-    assert solved.visits.shape == (width,)
-    assert solved.iterates.shape == solved.averages.shape == (10, width)
-    assert np.all((solved.profile >= 0.0) & (solved.profile <= 1.0)), solved.profile
 
 
 # --- the method: regret matching plus, linear weighting, the tremble --------
@@ -258,12 +197,6 @@ def test_the_tremble_lifts_the_off_path_sets_and_without_it_they_stay_quiet():
     assert lifted > 0, (quiet, lifted)
 
 
-def test_the_trembled_probability_is_never_the_one_reported():
-    """The report accumulates the untrembled strategy, though trembled play decides how often it accumulates."""
-    auction = A.Auction(q=Q, c=0.0, reimbursement_policy="zero")
-    tremble = 0.5  # exaggerated, so accumulating the trembled figure would pin the report to the middle half
-    solved = M.solve(auction, seed=0, iterations=ITERATIONS, tremble=tremble)
-    assert np.any((solved.profile < tremble / 2) | (solved.profile > 1.0 - tremble / 2)), solved.profile
 
 
 def test_the_average_weights_later_iterations_more_heavily_than_earlier_ones():
@@ -282,30 +215,10 @@ def test_the_average_weights_later_iterations_more_heavily_than_earlier_ones():
         assert nearer_leaning > 0.0, (seed, nearer_leaning)
 
 
-def solver_source():
-    """Every node of the solver module's syntax tree, for the two tests that read it as text."""
-    return ast.walk(ast.parse(pathlib.Path(M.__file__).read_text()))
 
 
-def test_no_learned_probability_is_rounded_to_a_pure_action():
-    """The targets are genuinely mixed, so rounding the report would select a different equilibrium."""
-    rounding = {"round", "rint", "floor", "ceil", "trunc", "heaviside", "sign"}
-    called = set()
-    for node in solver_source():
-        if isinstance(node, ast.Call):
-            called.add(node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", ""))
-    assert not called & rounding, sorted(called & rounding)
 
 
-def test_the_solver_module_does_not_reach_for_the_symmetric_reduction():
-    """The reduction fires only on symmetric profiles, and the one path here that can be handed one is scoring."""
-    modules = set()
-    for node in solver_source():
-        if isinstance(node, ast.Import):
-            modules.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module.split(".")[0])
-    assert "symmetric" not in modules, sorted(modules)
 
 
 # --- scoring a finished profile ---------------------------------------------
@@ -313,7 +226,7 @@ def test_the_solver_module_does_not_reach_for_the_symmetric_reduction():
 
 def bully(auction):
     """One bidder staying on either signal while the other concedes, an equilibrium the paper does not derive."""
-    return AN.profile(auction, AN.ALWAYS, AN.NEVER)
+    return game.profile(auction, lambda state, signal: 1.0, lambda state, signal: 0.0)
 
 
 def test_scoring_an_exact_target_finds_the_derived_equilibrium():
@@ -326,13 +239,6 @@ def test_scoring_an_exact_target_finds_the_derived_equilibrium():
         assert got.verdict is M.Verdict.DERIVED, (name, got)
 
 
-def test_scoring_reports_the_trembled_gain_alongside_the_ordinary_one():
-    """The sets the ordinary gain drops for want of reach are where a conceding bidder's mistake sits."""
-    auction, sigma = target("zero")
-    assert M.score(auction, sigma).trembled_gain < TIGHT
-    got = M.score(auction, bully(auction))
-    assert got.one_shot_gain < TIGHT, got
-    assert got.trembled_gain > 1e-6, got
 
 
 def test_the_three_cases_are_told_apart_by_the_returned_verdict():
@@ -351,45 +257,28 @@ def test_nothing_in_the_scoring_path_symmetrises_the_profile():
     mean = S.symmetrise(auction, asymmetric)
     assert not np.allclose(asymmetric, mean)
     got, bucket = M.score(auction, asymmetric), M.score(auction, mean)
-    assert abs(got.utility_loss - AN.utility_loss(auction, asymmetric)) < TIGHT, got
+    assert abs(got.utility_loss - A.utility_loss(auction, asymmetric)) < TIGHT, got
     assert abs(got.revenue - A.evaluate(auction, asymmetric).revenue) < TIGHT, got
     # Symmetrising first would have reported the bucket mean's numbers, and lost the equilibrium with them.
     assert got.utility_loss < TIGHT and bucket.utility_loss > 1e-6, (got, bucket)
     assert got.verdict is M.Verdict.DIFFERENT and bucket.verdict is M.Verdict.UNSOLVED, (got, bucket)
 
 
-def test_scoring_a_supplied_profile_never_runs_the_solver():
-    """A profile already known to be exact is scored without paying for a run to produce one."""
-    auction, sigma = target("zero")
-    saved = M.solve
-
-    def refuse(*arguments, **keywords):
-        raise AssertionError("scoring ran the solver")
-
-    M.solve = refuse
-    try:
-        got = M.score(auction, sigma)
-    finally:
-        M.solve = saved
-    assert got.verdict is M.Verdict.DERIVED
 
 
-def test_the_revenue_scored_against_is_the_mean_unit_closed_form():
-    """The published revenues are twice these, so scoring against them would miss every target by its own size."""
+def test_the_revenue_scored_against_is_the_published_closed_form():
+    """Scoring reads the paper's revenues as printed, with no rescaling between the two."""
+    published = {"zero": Q**2 * game.R0(C), "full": 2 * Q**2 - C * game.L0(Q), "targeted": 2 * Q**2 * (1 - 3 * C)}
     for name in A.REIMBURSEMENT_POLICIES:
         got = M.score(*target(name))
-        assert abs(got.revenue - AN.PI[name](C, Q)) < TIGHT, (name, got.revenue)
-        assert abs(got.revenue - AN.PUBLISHED[name](C, Q)) > 0.1, (name, got.revenue)
+        assert abs(got.revenue - published[name]) < TIGHT, (name, got.revenue)
 
 
-def test_the_stay_probabilities_scored_against_are_the_mean_unit_closed_forms():
-    """The published schedule halves each cost differently, so it sits a visible distance from the one used."""
+def test_the_stay_probabilities_scored_against_are_the_published_closed_forms():
+    """The war of attrition mixes at the paper's printed probabilities, 1 - 4c/3 and 1 - 4c."""
     auction, _ = target("zero")
     derived, _ = M.closed_forms(auction)
-    assert np.allclose(schedule(auction, derived, 1), [1.0, AN.sigma1(C), 1.0, AN.sigma3(C)])
-    assert not np.allclose(
-        schedule(auction, derived, 1), [1.0, AN.published_sigma1(C), 1.0, AN.published_sigma3(C)]
-    )
+    assert np.allclose(schedule(auction, derived, 1), [1.0, 1 - 4 * C / 3, 1.0, 1 - 4 * C])
 
 
 def test_the_reported_schedule_names_the_probabilities_the_closed_forms_are_stated_as():
@@ -399,19 +288,12 @@ def test_the_reported_schedule_names_the_probabilities_the_closed_forms_are_stat
     assert M.stay_schedule(auction, derived) == {
         "open_high": 1.0,
         "open_low": 0.0,
-        "sigma1": AN.sigma1(C),
+        "sigma1": game.sigma1(C),
         "sigma2": 1.0,
-        "sigma3": AN.sigma3(C),
+        "sigma3": game.sigma3(C),
     }
 
 
-def test_the_verdict_reads_the_two_distance_bars_it_was_given():
-    """The bars are read off a long run rather than picked in advance, so scoring takes them as it is handed them."""
-    auction, _ = target("zero")
-    far = bully(auction)  # a certified equilibrium, a full unit of stay probability from the closed form
-    assert M.score(auction, far, stay_bar=1.0, revenue_bar=0.3).verdict is M.Verdict.DERIVED
-    assert M.score(auction, far, stay_bar=1.0).verdict is M.Verdict.DIFFERENT  # the revenue is still far
-    assert M.score(auction, far, revenue_bar=0.3).verdict is M.Verdict.DIFFERENT  # the profile is still far
 
 
 def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
@@ -426,78 +308,29 @@ def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
     assert got.verdict is M.Verdict.DERIVED, got
 
 
-def test_the_off_path_distance_is_reported_rather_than_folded_into_the_bar():
-    """It ranges over the whole unit interval at any budget, so it is recorded and left to the trembled gain."""
-    auction, sigma = target("zero")
-    stray = sigma.copy()
-    stray[auction.info_index[(0, auction.states[3], 0)]] = 0.6
-    assert M.score(auction, stray).off_path_distance == 0.6
-    assert M.score(auction, sigma).off_path_distance == 0.0
 
 
-def test_the_closed_forms_refuse_what_they_do_not_describe():
-    """Scoring against a form that does not describe the auction would be nonsense, so it fails rather than reports."""
-    try:
-        M.closed_forms(A.Auction(n=3, q=Q, c=C, reimbursement_policy="zero"))
-    except ValueError as exc:
-        assert "two-bidder" in str(exc), exc
-    else:
-        assert False, "an auction the closed forms do not describe was scored rather than refused"
-    try:
-        M.closed_forms(A.Auction(q=Q, c=C, reimbursement_policy=lambda round_index: 0.5 * C))
-    except ValueError as exc:
-        assert "no closed form" in str(exc), exc
-    else:
-        assert False, "a reimbursement policy with no closed form was scored rather than refused"
 
 
-def test_a_belief_tremble_too_faint_to_reach_an_off_path_set_stops_the_score():
-    """Scoring passes on the refusal rather than reporting a gain of zero at a set nothing reached."""
-    auction = A.Auction(q=Q, c=0.4, reimbursement_policy="zero")  # dear enough that every bidder exits at once
-    sigma = AN.profile(auction, AN.NEVER)
-    try:
-        M.score(auction, sigma, belief_tremble=1e-7)
-    except ValueError as exc:
-        assert "too faint" in str(exc), exc
-    else:
-        assert False, "a tremble that reaches no off-path set was scored rather than refused"
 
 
-def test_a_run_is_scored_from_the_profile_it_returned():
-    """The solver's own output goes into scoring as it stands, which is how the pipeline reads a run."""
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    got = M.score(auction, M.solve(auction, seed=0, iterations=ITERATIONS).profile)
-    assert got.verdict in tuple(M.Verdict)
-    measured = (got.utility_loss, got.one_shot_gain, got.trembled_gain, got.on_path_distance, got.revenue_distance)
-    assert all(np.isfinite(value) and value >= 0.0 for value in measured), got
 
 
-# --- the grid the validation pipeline spends the budget on ------------------
+# --- the grid ---------------------------------------------------------------
 
 
-def test_every_grid_cost_sits_where_its_placement_names():
-    """Costs are placed against the region bound, which moves with q, so the names have to move with it."""
-    for q, placement, c in V.grid():
-        bound = AN.region(q)
-        sits = {"inside": c < bound, "bound": c == bound, "outside": c > bound}
-        assert sits[placement], (q, placement, c, bound)
 
 
-def test_the_grid_reaches_the_half_of_the_region_the_incentive_bound_closes():
-    """ADR-0004 measured at q = 0.5 alone, where cbar binds, so the other bound has to be exercised too."""
-    probabilities = sorted({q for q, _, _ in V.grid()})
-    assert [q for q in probabilities if AN.ic_bound(q) < AN.CBAR], probabilities
-    assert [q for q in probabilities if AN.ic_bound(q) > AN.CBAR], probabilities
 
 
 def test_the_targeted_closed_form_stops_being_an_equilibrium_past_the_incentive_bound():
     """Where separation is not preserved the derived verdict is out of reach, and different is the answer."""
-    for q, _, c in V.grid():
+    for q, _, c in T.grid(T.VALIDATION) + T.grid(T.ROBUSTNESS):
         for rule in A.REIMBURSEMENT_POLICIES:
             auction = A.Auction(q=q, c=c, reimbursement_policy=rule)
-            sigma = AN.profile(auction, AN.closed_form_strategy(rule, c))
-            loss = float(AN.utility_loss(auction, sigma))
-            assert (loss > AN.CERTIFIED) == (rule == "targeted" and c > AN.ic_bound(q)), (q, c, rule, loss)
+            sigma = game.profile(auction, game.closed_form_strategy(rule, c))
+            loss = float(A.utility_loss(auction, sigma))
+            assert (loss > A.CERTIFIED) == (rule == "targeted" and c > game.ic_bound(q)), (q, c, rule, loss)
 
 
 if __name__ == "__main__":

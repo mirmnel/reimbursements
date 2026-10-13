@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 
-import analysis as AN
-import solver as A
+from auction import game as G
+from auction import exact as A
 
-Q, C, TIGHT = 0.5, 0.025, 1e-9
+Q, C, TIGHT = 0.5, 0.05, 1e-9
 
 
 def target(reimbursement_policy, c=C, q=Q, **overrides):
     """The game under a reimbursement policy, and the equilibrium the paper targets in it."""
     auction = A.Auction(q=q, c=c, reimbursement_policy=reimbursement_policy, **overrides)
-    return auction, AN.profile(auction, AN.closed_form_strategy(reimbursement_policy, c))
+    return auction, G.profile(auction, G.closed_form_strategy(reimbursement_policy, c))
 
 
 def schedule(auction, sigma, signal):
@@ -27,70 +27,58 @@ def schedule(auction, sigma, signal):
 
 def test_cbar_is_the_root_the_paper_reports():
     """cbar roots the revenue-difference cubic below one quarter, where the difference changes sign."""
-    cbar = AN.CBAR
-    assert abs(cbar - 0.108629 / 2) < 5e-7, cbar  # mean units halve every cost
-    gap = lambda c: AN.PI["targeted"](c, Q) - AN.PI["zero"](c, Q)
+    cbar = G.CBAR
+    assert abs(cbar - 0.108629) < 5e-7, cbar
+    gap = lambda c: G.PI["targeted"](c, Q) - G.PI["zero"](c, Q)
     assert gap(cbar - 1e-4) > 0 > gap(cbar + 1e-4)  # the revenue difference changes sign exactly there
 
 
 def test_the_region_closes_differently_at_each_of_its_two_bounds():
     """At the cost root the revenues tie, and at the incentive bound they do not, so one end is open."""
     q = 0.9  # past 0.783, where the incentive bound is the lesser of the two
-    bound = AN.ic_bound(q)
-    margin = lambda c: AN.PI["targeted"](c, q) - max(AN.PI["zero"](c, q), AN.PI["full"](c, q))
-    assert margin(bound) > 0 and AN.region_claim(bound, q), bound  # separation holds at the bound itself
-    assert margin(AN.CBAR) < 1e-12 and not AN.region_claim(AN.CBAR, 0.5), AN.CBAR
+    bound = G.ic_bound(q)
+    margin = lambda c: G.PI["targeted"](c, q) - max(G.PI["zero"](c, q), G.PI["full"](c, q))
+    assert margin(bound) > 0 and G.region_claim(bound, q), bound  # separation holds at the bound itself
+    assert margin(G.CBAR) < 1e-12 and not G.region_claim(G.CBAR, 0.5), G.CBAR
     # Past the incentive bound the formulas still favour the targeted rule, at a profile nobody plays.
-    past = (bound + AN.CBAR) / 2
-    assert margin(past) > 0 and not AN.region_claim(past, q), past
+    past = (bound + G.CBAR) / 2
+    assert margin(past) > 0 and not G.region_claim(past, q), past
 
 
 def test_targeted_beats_full_by_exactly_two_q_c():
     """The closed-form gap between the targeted and full policies holds at every cost and probability."""
     for q in (0.25, 0.5, 0.75):
-        for c in (0.005, 0.025, 0.075):
-            assert abs(AN.PI["targeted"](c, q) - AN.PI["full"](c, q) - 2 * q * c) < 1e-12
+        for c in (0.01, 0.05, 0.15):
+            assert abs(G.PI["targeted"](c, q) - G.PI["full"](c, q) - 2 * q * c) < 1e-12
 
 
 # --- the exact solver reproduces the paper, without being told the answer ---
 
 
-def test_frictionless_benchmark_price_and_stay_rounds():
-    """The frictionless benchmark reproduces the closed-form expected price and staying bidder-rounds."""
+def test_frictionless_benchmark_price():
+    """The frictionless benchmark reproduces the closed-form expected price."""
     for q in (0.25, 0.5, 0.75):
         outcome = A.evaluate(*target("full", q=q))
-        assert abs(outcome.price - q**2) < TIGHT
-        assert abs(outcome.stay_rounds - AN.L0(q)) < TIGHT
+        assert abs(outcome.price - 2 * q**2) < TIGHT
 
 
 def test_seller_revenue_matches_every_closed_form():
     """Exact evaluation of each target reproduces ``Pi_0``, ``Pi_full`` and ``Pi_T``."""
     for q in (0.25, 0.5, 0.75):
-        for c in (0.005, 0.025, 0.05, 0.075, 0.1):
+        for c in (0.01, 0.05, 0.1, 0.15, 0.2):  # the published cost grid
             for name in A.REIMBURSEMENT_POLICIES:
                 got = A.evaluate(*target(name, c=c, q=q)).revenue
-                assert abs(got - AN.PI[name](c, q)) < TIGHT, (name, c, q, got)
-
-
-def test_rescaling_to_mean_units_reproduces_the_published_revenues():
-    """Halving the cost and the tick under mean units reproduces every published two-bidder revenue."""
-    for q in (0.25, 0.5, 0.75):
-        for c in (0.01, 0.05, 0.1, 0.15, 0.2):  # the published cost grid, stated in sum units
-            for name in A.REIMBURSEMENT_POLICIES:
-                auction, sigma = target(name, c=c / 2, q=q, delta=AN.PUBLISHED_TICK / 2)
-                got = 2 * A.evaluate(auction, sigma).revenue
-                assert abs(got - AN.PUBLISHED[name](c, q)) < TIGHT, (name, c, q, got)
+                assert abs(got - G.PI[name](c, q)) < TIGHT, (name, c, q, got)
 
 
 # --- the targets are equilibria --------------------------------------------
 
 
 def test_paper_targets_are_exact_equilibria():
-    """Zero utility loss and zero deviation gain everywhere: sequential rationality."""
+    """Zero utility loss for every published target."""
     for name in A.REIMBURSEMENT_POLICIES:
         auction, sigma = target(name)
-        assert AN.utility_loss(auction, sigma) < 1e-12, name
-        assert AN.max_regret(auction, sigma) < 1e-12, name
+        assert A.utility_loss(auction, sigma) < 1e-12, name
 
 
 def test_endgame_is_knife_edge_and_the_opening_is_not():
@@ -103,15 +91,15 @@ def test_endgame_is_knife_edge_and_the_opening_is_not():
     assert A.counterfactual_gain(auction, sigma, at[(0, auction.root(), 0)]) < -1e-6  # L strictly exits at p = 0
 
 
-def test_opening_incentive_constraint_binds_at_one_minus_q_over_four():
+def test_opening_incentive_constraint_binds_at_one_minus_q_over_two():
     """Under the targeted policy the opening gain is the incentive bound less the cost."""
     for q in (0.25, 0.5, 0.75):
-        for c in (AN.ic_bound(q) - 0.05, AN.ic_bound(q) + 0.05):
+        for c in (G.ic_bound(q) - 0.1, G.ic_bound(q) + 0.1):
             auction, sigma = target("targeted", c=c, q=q)
             position = auction.info_index[(0, auction.root(), 1)]
-            gain = A.counterfactual_gain(auction, sigma, position) / A.counterfactual_reach(auction, sigma)[position]
-            assert abs(gain - (AN.ic_bound(q) - c)) < TIGHT
-            assert (gain > 0) == (c < AN.ic_bound(q))
+            gain = A.counterfactual_gain(auction, sigma, position) / q  # the opening's reach is the prior on H
+            assert abs(gain - (G.ic_bound(q) - c)) < TIGHT
+            assert (gain > 0) == (c < G.ic_bound(q))
 
 
 # --- the revenue ranking ----------------------------------------------------
@@ -124,8 +112,8 @@ def revenues(c, q):
 
 def test_ranking_against_no_reimbursement_fails_above_cbar():
     """Above ``cbar`` the targeted policy loses to doing nothing, but never to full."""
-    assert AN.CBAR < AN.ic_bound(0.5)  # at q = 1/2 the binding bound is cbar
-    for c in (0.065, 0.075, 0.1):
+    assert G.CBAR < G.ic_bound(0.5)  # at q = 1/2 the binding bound is cbar
+    for c in (0.13, 0.15, 0.2):
         revenue = revenues(c, 0.5)
         assert revenue["zero"] > revenue["targeted"] > revenue["full"], (c, revenue)
 

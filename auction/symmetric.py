@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from game import Auction, Outcome
+from .game import Auction, Outcome
 
 
 TOLERANCE = 1e-12  # how far a profile may sit from its bucket mean and still be symmetric
@@ -72,12 +72,12 @@ def requires_exchangeability(auction: Auction) -> None:
         raise ValueError(
             "the orbit reduction reads the signal profile through its high-signal count alone, which a "
             "prior that is not exchangeable breaks. Evaluate on histories instead, by way of "
-            "solver.evaluate or analysis.utility_loss"
+            "exact.evaluate or exact.utility_loss"
         )
     if not auction.orbit_measurable:
         raise ValueError(
             "the orbit reduction pays one reimbursement per orbit, which a rule separating histories "
-            "inside an orbit breaks. Evaluate on histories instead, by way of solver.evaluate"
+            "inside an orbit breaks. Evaluate on histories instead, by way of exact.evaluate"
         )
 
 
@@ -114,12 +114,12 @@ def _onward(auction: Auction, orbit: int, leaving: np.ndarray) -> Tuple[np.ndarr
 
 def seller_values(
     auction: Auction, stay: np.ndarray, refunds: Optional[np.ndarray] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Expected price, reimbursement and staying bidder-rounds from each orbit onward."""
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Expected price and reimbursement from each orbit onward."""
     requires_exchangeability(auction)
     paid = refunds_of(auction, refunds)
     shape = (len(auction.orbits), auction.n + 1)
-    price, payout, stayed = np.zeros(shape), np.zeros(shape), np.zeros(shape)
+    price, payout = np.zeros(shape), np.zeros(shape)
     for orbit in reversed(range(len(auction.orbits))):
         round_index = auction.orbits[orbit][0]
         active = int(auction.orbit_active[orbit])
@@ -135,8 +135,7 @@ def seller_values(
             payout[orbit, high] = np.sum(
                 thin * (stayers * refund + np.where(carries, payout[safe, survivors], 0.0))
             )
-            stayed[orbit, high] = np.sum(thin * (stayers + np.where(carries, stayed[safe, survivors], 0.0)))
-    return price, payout, stayed
+    return price, payout
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +204,7 @@ def tagged_reach(
     # correlated prior is no longer its marginal times a binomial.
     start = auction.own_and_others[signal]
     mass[0, : others + 1] = start
-    value_mass[0, : others + 1] = start * (np.arange(others + 1.0) + signal) / n
+    value_mass[0, : others + 1] = start * (np.arange(others + 1.0) + signal)
     for orbit in range(len(auction.orbits)):
         active = int(auction.orbit_active[orbit])
         for high in range(active):
@@ -236,7 +235,7 @@ def combine(auction: Auction, values: Values, signal: int) -> float:
     high = np.arange(auction.n)
     # Conditional on the tagged bidder's own signal, since the caller weights by that separately.
     weights = auction.own_and_others[signal] / signal_weight(auction, signal)
-    return float(np.sum(weights * (const[0, high] + coefficient[0, high] * (high + signal) / auction.n)))
+    return float(np.sum(weights * (const[0, high] + coefficient[0, high] * (high + signal))))
 
 
 def tagged_payoff(
@@ -255,15 +254,15 @@ def tagged_payoff(
 def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
     """Exact expectations under a symmetric profile, on exit-round orbits rather than histories."""
     stay = anonymise(auction, sigma)
-    price, payout, stayed = seller_values(auction, stay, refunds)
+    price, payout = seller_values(auction, stay, refunds)
     n = auction.n
     high = np.arange(n + 1)
-    seller = [float(np.sum(auction.signal_counts * table[0, high])) for table in (price, payout, stayed)]
+    seller = [float(np.sum(auction.signal_counts * table[0, high])) for table in (price, payout)]
     payoff = sum(
         signal_weight(auction, signal) * tagged_payoff(auction, stay, stay, signal, refunds)
         for signal in (0, 1)
     )
-    return Outcome(np.full(n, payoff), seller[0], seller[1], seller[2])
+    return Outcome(np.full(n, payoff), seller[0], seller[1])
 
 
 def bucket_arrival(auction: Auction, sigma: np.ndarray) -> np.ndarray:
@@ -333,12 +332,3 @@ def utility_loss(auction: Auction, sigma: np.ndarray) -> float:
         )
     return loss
 
-
-def max_regret(auction: Auction, sigma: np.ndarray) -> float:
-    """Largest one-shot deviation gain at any information set of positive opponent reach."""
-    stay = anonymise(auction, sigma)
-    gain, reach = gains(auction, sigma)
-    reached = reach > 1e-12
-    normalised = np.divide(gain, reach, out=np.zeros_like(gain), where=reached)
-    regret = (1 - stay) * np.maximum(normalised, 0.0) + stay * np.maximum(-normalised, 0.0)
-    return float(np.max(np.where(reached, regret, 0.0)))
