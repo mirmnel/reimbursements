@@ -31,6 +31,8 @@ BOTTOM = 20_000  # where the median loss bottoms at q = 0.9, for the budget prob
 PROBED = ("bound", "outside")  # the two cells the ranking turns on at q = 0.9
 PROBE_SEEDS = 3
 
+TRACE = 1_000  # iterations between the snapshots a run is scored at along the way
+
 Row = Dict[str, object]
 Cell = Tuple[float, str, float]
 
@@ -40,7 +42,8 @@ def write(name: str, rows: Sequence[Row]) -> None:
     os.makedirs(RESULTS, exist_ok=True)
     path = os.path.join(RESULTS, name)
     with open(path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+        fields = [name for name in rows[0] if name != "trace"]
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     print(f"wrote {path} ({len(rows)} rows)")
@@ -54,7 +57,7 @@ def grid(cells: Dict[float, Sequence[str]]) -> List[Cell]:
 def run(auction: Auction, placement: str, seed: int, iterations: int = BUDGET) -> Row:
     """One symmetry-restricted run, scored against the closed forms."""
     started = time.perf_counter()
-    solved = solve(auction, seed=seed, iterations=iterations, trace_every=iterations // 2, symmetry_restricted=True)
+    solved = solve(auction, seed=seed, iterations=iterations, trace_every=TRACE, symmetry_restricted=True)
     seconds = time.perf_counter() - started
     scored = score(auction, solved.profile)
     derived, _ = closed_forms(auction)
@@ -77,6 +80,12 @@ def run(auction: Auction, placement: str, seed: int, iterations: int = BUDGET) -
         "revenue_distance": scored.revenue_distance,
         "visited": int((solved.visits > 0).sum()),
         "info_sets": len(auction.info_sets),
+        "trace": [
+            {"reimbursement_policy": auction.reimbursement_policy, "placement": placement, "q": auction.q,
+             "seed": seed, "iteration": TRACE * (k + 1), "utility_loss": float(utility_loss(auction, profile))}
+            | {name: p for name, p in stay_schedule(auction, profile).items() if name.startswith("sigma")}
+            for k, profile in enumerate(solved.averages)
+        ],
     } | schedule
     assert float(row["open_high"]) > float(row["open_low"]), row
     if scored.verdict is Verdict.DERIVED:
@@ -159,6 +168,7 @@ def report(ranking: Sequence[Row]) -> None:
 def validation() -> List[Row]:
     """Experiment 1: ten seeds at each sampled cell under each published rule."""
     rows = sweep(grid(VALIDATION))
+    write("validation_trace.csv", [point for row in rows for point in row["trace"]])
     write("validation.csv", rows)  # before the claims are checked, so a failed claim keeps its runs
     check(rows)
     inside = [r for r in rows if (r["reimbursement_policy"], r["q"], r["placement"]) == ("zero", 0.5, "inside")]

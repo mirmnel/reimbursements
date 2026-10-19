@@ -19,7 +19,7 @@ from auction.game import CBAR, PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, pa
 from auction.mccfr import REVENUE_BAR, STAY_BAR, Verdict, closed_forms, stay_schedule
 from auction.exact import CERTIFIED
 from experiments.scale import COUNTS, ROUNDS
-from experiments.two_bidder import RESULTS, SIGNAL_PROBABILITIES
+from experiments.two_bidder import RESULTS, SIGNAL_PROBABILITIES, VALIDATION, grid
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 RULE_COLOR = {"zero": "#2a78d6", "full": "#eb6834", "targeted": "#1baf7a"}
@@ -225,6 +225,46 @@ def schedule_panels(runs: List[Dict[str, object]]) -> None:
     save(fig, "validation_schedule")
 
 
+def trace_panels() -> None:
+    """Utility loss along every run, a row per rule, then the r=0 stay schedule along the same runs."""
+    points = read("validation_trace.csv", ("q", "iteration", "utility_loss", "sigma1", "sigma2", "sigma3"))
+    cells = grid(VALIDATION)
+    fig, axes = plt.subplots(4, len(cells), figsize=(7.0, 6.4), sharex=True, sharey="row", constrained_layout=True)
+    for column, (q, placement, c) in enumerate(cells):
+        at = [p for p in points if (p["q"], p["placement"]) == (q, placement)]
+        for row, rule in enumerate(REIMBURSEMENT_POLICIES):
+            axis = axes[row, column]
+            runs = [[p for p in at if p["reimbursement_policy"] == rule and p["seed"] == seed]
+                    for seed in sorted({p["seed"] for p in at})]
+            iterations = [p["iteration"] for p in runs[0]]
+            losses = np.array([[p["utility_loss"] for p in run] for run in runs])
+            for loss in losses:
+                axis.plot(iterations, loss, color=RULE_COLOR[rule], linewidth=0.6, alpha=0.35)
+            axis.plot(iterations, np.median(losses, axis=0), color=RULE_COLOR[rule], linewidth=2)
+            axis.axhline(CERTIFIED, color=MUTED, linewidth=0.8, linestyle=(0, (4, 3)))
+            axis.set_xscale("log")
+            axis.set_yscale("log")
+            chrome(axis, f"$q={q:g}$\n{placement}" if row == 0 else "", "", f"{RULE_LABEL[rule]} utility loss" if column == 0 else "")
+        axis = axes[3, column]
+        zero = [p for p in at if p["reimbursement_policy"] == "zero"]
+        target = theory_schedule(q, c)
+        for name, color in zip(("sigma1", "sigma2", "sigma3"), PLACEMENT_COLOR.values()):
+            series = np.array([[p[name] for p in zero if p["seed"] == seed] for seed in sorted({p["seed"] for p in zero})])
+            axis.plot(iterations, np.median(series, axis=0), color=color, linewidth=2)
+            axis.axhline(target[name], color=color, linewidth=0.8, linestyle=(0, (4, 3)))
+        chrome(axis, "", "iteration", "$r=0$ stay probability" if column == 0 else "")
+    for axis in axes.flat:
+        axis.tick_params(which="both", labelsize=6.5)
+        axis.title.set_fontsize(8)
+        axis.set_xticks([1_000, 10_000, 40_000], ["1k", "10k", "40k"], minor=False)
+        axis.set_xticks([], minor=True)
+    handles = [Line2D([], [], color=MUTED, linewidth=0.8, linestyle=(0, (4, 3)), label=r"$\varepsilon$, or closed form")]
+    handles += [Line2D([], [], color=color, linewidth=2, label=SCHEDULE_LABEL[name])
+                for name, color in zip(("sigma1", "sigma2", "sigma3"), PLACEMENT_COLOR.values())]
+    fig.legend(handles=handles, loc="outside lower center", ncol=4, fontsize=7.5, frameon=False, labelcolor=INK)
+    save(fig, "validation_trace")
+
+
 def save(fig: plt.Figure, name: str) -> None:
     """Write one figure as a PDF for the paper and a PNG for a quick look."""
     path = os.path.join(RESULTS, f"{name}.pdf")
@@ -421,6 +461,7 @@ def validation_figure() -> None:
     by_cost_panels(runs)
     region_panels(runs)
     schedule_panels(runs)
+    trace_panels()
 
 
 if __name__ == "__main__":
