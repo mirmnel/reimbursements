@@ -4,9 +4,9 @@ Companion code for the paper's three learning experiments.
 
 ```bash
 pip install -e .                       # numpy, scipy, matplotlib
-python3 -m experiments.two_bidder validation  # experiment 1, ~40 min
-python3 -m experiments.two_bidder robustness  # experiment 2, ~55 min
-python3 -m experiments.scale                  # experiment 3, ~65 min
+python3 -m experiments.two_bidder validation  # experiment 1, ~11 min on 8 cores
+python3 -m experiments.two_bidder robustness  # experiment 2, ~16 min on 8 cores
+python3 -m experiments.scale                  # experiment 3, ~55 min
 python3 -m experiments.plots                  # every figure, from the CSVs in results/
 python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 s (each test file runs on its own)
 ```
@@ -16,7 +16,7 @@ python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 
 | experiment | script | writes |
 |---|---|---|
 | 1. Validation: MCCFR recovers separation, the stay probabilities under `r=0`, and `Pi_0`, `Pi_full`, `Pi_T` | `experiments/two_bidder.py validation` | `validation.csv` |
-| 2. Robustness: the ranking `Pi_T > max(Pi_0, Pi_full)` at learned play, refined near both bounds | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv`, `budget_probe.csv` |
+| 2. Robustness: the ranking `Pi_T > max(Pi_0, Pi_full)` at learned play, refined near both bounds | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv` |
 | 3. Scale: at `n` in 3, 4, 6, solve `Gamma^0`, write the minimum-cost rule `r*`, and test whether learning recovers the reference | `experiments/scale.py` | `scale_rules.csv`, `scale.csv` |
 
 Every run is scored with one of three verdicts. `derived` means it is certified as an equilibrium and sits at the

@@ -139,7 +139,6 @@ def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str,
         "Pi": revenue,
         "Pi_target": target_revenue,
         "info_sets": len(under.info_sets),
-        "visited": int((solved.visits > 0).sum()),
     }
     print(f"  n={reference.n} seed={seed} {'restricted' if restricted else 'unrestricted':12s} "
           f"{row['verdict']:9s} loss {loss:.2e}  Pi {revenue:.4f}  {seconds:.0f} s")

@@ -87,8 +87,6 @@ def test_the_ranking_refuses_rules_that_were_given_different_budgets():
     raise AssertionError("three rules at two budgets were ranked against each other")
 
 
-
-
 def test_the_ranking_carries_the_verdict_each_revenue_was_read_off():
     """A ranking read off a rule that landed on another equilibrium is a different claim, and has to say so."""
     rows = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21}, verdict=Verdict.UNSOLVED)

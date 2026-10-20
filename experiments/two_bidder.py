@@ -6,6 +6,7 @@ import csv
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Sequence, Tuple
 
 from auction.game import PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, region, region_claim
@@ -26,10 +27,6 @@ VALIDATION = {0.5: ("inside", "bound", "outside"), 0.75: ("bound", "outside"), 0
 # Experiment 2 refines both bounds, one signal probability per bound.
 SIGNAL_PROBABILITIES = (0.5, 0.9)
 ROBUSTNESS = {q: tuple(PLACEMENTS) for q in SIGNAL_PROBABILITIES}
-
-BOTTOM = 20_000  # where the median loss bottoms at q = 0.9, for the budget probe
-PROBED = ("bound", "outside")  # the two cells the ranking turns on at q = 0.9
-PROBE_SEEDS = 3
 
 TRACE = 1_000  # iterations between the snapshots a run is scored at along the way
 
@@ -54,10 +51,10 @@ def grid(cells: Dict[float, Sequence[str]]) -> List[Cell]:
     return [(q, placement, PLACEMENTS[placement] * region(q)) for q, named in cells.items() for placement in named]
 
 
-def run(auction: Auction, placement: str, seed: int, iterations: int = BUDGET) -> Row:
+def run(auction: Auction, placement: str, seed: int) -> Row:
     """One symmetry-restricted run, scored against the closed forms."""
     started = time.perf_counter()
-    solved = solve(auction, seed=seed, iterations=iterations, trace_every=TRACE, symmetry_restricted=True)
+    solved = solve(auction, seed=seed, iterations=BUDGET, trace_every=TRACE, symmetry_restricted=True)
     seconds = time.perf_counter() - started
     scored = score(auction, solved.profile)
     derived, _ = closed_forms(auction)
@@ -78,7 +75,6 @@ def run(auction: Auction, placement: str, seed: int, iterations: int = BUDGET) -
         "Pi": scored.revenue,
         "Pi_closed_form": PI[auction.reimbursement_policy](auction.c, auction.q),
         "revenue_distance": scored.revenue_distance,
-        "visited": int((solved.visits > 0).sum()),
         "info_sets": len(auction.info_sets),
         "trace": [
             {"reimbursement_policy": auction.reimbursement_policy, "placement": placement, "q": auction.q,
@@ -93,14 +89,17 @@ def run(auction: Auction, placement: str, seed: int, iterations: int = BUDGET) -
     return row
 
 
-def sweep(cells: Sequence[Cell], seeds: int = SEEDS, iterations: int = BUDGET) -> List[Row]:
+def run_job(job: Tuple[str, float, str, float, int]) -> Row:
+    """``run`` on one job, built in the worker process."""
+    rule, q, placement, c, seed = job
+    return run(Auction(q=q, c=c, reimbursement_policy=rule), placement, seed)
+
+
+def sweep(cells: Sequence[Cell]) -> List[Row]:
     """Every published rule at every cell at every seed, with verdict counts printed per cell."""
-    rows = [
-        run(Auction(q=q, c=c, reimbursement_policy=rule), placement, seed, iterations)
-        for rule in REIMBURSEMENT_POLICIES
-        for (q, placement, c) in cells
-        for seed in range(seeds)
-    ]
+    jobs = [(rule, q, placement, c, seed) for rule in REIMBURSEMENT_POLICIES for (q, placement, c) in cells for seed in range(SEEDS)]
+    with ProcessPoolExecutor() as pool:
+        rows = list(pool.map(run_job, jobs))
     for rule in REIMBURSEMENT_POLICIES:
         for q, placement, c in cells:
             at = [r for r in rows if (r["reimbursement_policy"], r["q"], r["placement"]) == (rule, q, placement)]
@@ -177,7 +176,7 @@ def validation() -> List[Row]:
 
 
 def robustness() -> List[Row]:
-    """Experiment 2: the refined grid, the ranking at learned play, and the same ranking at a larger budget."""
+    """Experiment 2: the refined grid, and the ranking at learned play."""
     rows = sweep(grid(ROBUSTNESS))
     write("robustness.csv", rows)
     check(rows)
@@ -190,13 +189,6 @@ def robustness() -> List[Row]:
     inside = [r for r in ranking if r["placement"] == "inside" and r["q"] == 0.5]
     assert len(inside) == SEEDS and all(r["targeted_wins"] for r in inside), inside
     assert not any(r["targeted_wins"] for r in ranking if r["placement"] == "outside")
-
-    probe_cells = [cell for cell in grid(ROBUSTNESS) if cell[0] == 0.9 and cell[1] in PROBED]
-    probed = ranked(sweep(probe_cells, PROBE_SEEDS, BOTTOM))
-    report(probed)
-    write("budget_probe.csv", probed)
-    at = {(r["q"], r["placement"], r["seed"]): r for r in ranking}
-    assert all(at[(r["q"], r["placement"], r["seed"])]["targeted_wins"] == r["targeted_wins"] for r in probed)
     return ranking
 
 

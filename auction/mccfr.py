@@ -18,9 +18,8 @@ EXIT, STAY = 0, 1
 INITIAL_REGRET = 0.1  # width of the interval initial regrets are drawn from at two bidders, one draw per seed
 ITERATIONS = 2000
 TRACE_EVERY = 20
-TREMBLE = 0.01  # uniform mass mixed into a sampled opponent action, during training only
 
-BUDGET = 40_000  # iterations a validation run gets, where the utility loss bottoms.
+BUDGET = 100_000  # iterations every run gets
 
 STAY_BAR = 0.06  # how far an on-path stay probability may sit from the closed form.
 REVENUE_BAR = 0.02  # the same bar on seller net revenue, at two bidders
@@ -32,7 +31,6 @@ class Solved:
 
     profile: np.ndarray  # average behavioural strategy, flat over the information sets
     regrets: np.ndarray  # (|I|, 2) regret of exiting and of staying, as the run left them
-    visits: np.ndarray  # times sampled play reached each information set, the enumeration aside
     iterates: np.ndarray  # (sample, |I|) the regret-matched profile along the run
     averages: np.ndarray  # the same for the average profile
     seed: int
@@ -45,6 +43,12 @@ def matched(regret: np.ndarray) -> np.ndarray:
     total = regret.sum(-1)
     # Nothing regretted yet, so no reason to lean either way.
     return np.divide(regret[..., STAY], total, out=np.full(np.shape(total), 0.5), where=total > 0.0)
+
+
+def matched_one(regret: list) -> float:
+    """``matched`` on one information set's [exit, stay] pair, in plain floats for the traversal."""
+    total = regret[0] + regret[1]
+    return regret[1] / total if total > 0.0 else 0.5
 
 
 def averaged(strategy_sum: np.ndarray, regret: np.ndarray) -> np.ndarray:
@@ -69,10 +73,9 @@ def solve(
     iterations: int = ITERATIONS,
     initial_regret: Optional[float] = None,
     trace_every: int = TRACE_EVERY,
-    tremble: float = TREMBLE,
     symmetry_restricted: bool = False,
 ) -> Solved:
-    """Run external-sampling MCCFR with regret matching plus, linear weighting and a trembled opponent."""
+    """Run external-sampling MCCFR with regret matching plus and linear weighting, sampling opponents on-policy."""
     # Restricted, every bidder reads and writes one shared table, so the search is symmetric by
     # construction rather than a finished profile being averaged. Unrestricted, each has its own.
     rng = np.random.default_rng(seed)
@@ -81,9 +84,9 @@ def solve(
     index = auction.info_index
     cells = shared_cells(auction) if symmetry_restricted else np.arange(len(auction.info_sets))
     cell_of = cells.tolist()  # plain ints, which the traversal indexes with far more cheaply
-    regret = rng.uniform(0.0, initial_regret, (int(cells.max()) + 1, 2))  # a random start per seed
-    strategy_sum = np.zeros_like(regret)
-    visits = np.zeros(len(auction.info_sets), dtype=np.int64)
+    # Plain lists, as numpy's per-call overhead dominates arithmetic on two floats.
+    regret = rng.uniform(0.0, initial_regret, (int(cells.max()) + 1, 2)).tolist()  # a random start per seed
+    strategy_sum = [[0.0, 0.0] for _ in regret]
     follow: Dict[State, Dict[int, State]] = {
         state: dict(auction.continuations[state]) for state in auction.states
     }
@@ -96,15 +99,12 @@ def solve(
         for position, bidder in enumerate(active):
             if bidder == traverser:
                 continue
-            # Counted here and not under the traverser, so visits say what play reached rather
-            # than what enumeration walked, which is what the tremble is judged on.
-            at = index[(bidder, state, signals[bidder])]
-            cell = cell_of[at]
-            stay = float(matched(regret[cell]))
-            strategy_sum[cell] += (weight * (1.0 - stay), weight * stay)
-            visits[at] += 1
-            # Trembled for the draw only, so the accumulation above stays the untrembled strategy.
-            if rng.random() < (1.0 - tremble) * stay + tremble * 0.5:
+            cell = cell_of[index[(bidder, state, signals[bidder])]]
+            stay = matched_one(regret[cell])
+            row = strategy_sum[cell]
+            row[0] += weight * (1.0 - stay)
+            row[1] += weight * stay
+            if rng.random() < stay:
                 sampled |= 1 << position
 
         def value(mask: int) -> float:
@@ -114,11 +114,12 @@ def solve(
 
         if traverser not in active:  # it has left, and nothing after that pays it
             return value(sampled)
-        cell = cell_of[index[(traverser, state, signals[traverser])]]
-        stay = float(matched(regret[cell]))
+        row = regret[cell_of[index[(traverser, state, signals[traverser])]]]
+        stay = matched_one(row)
         staying, exiting = value(sampled | 1 << active.index(traverser)), value(sampled)
         expected = stay * staying + (1.0 - stay) * exiting
-        regret[cell] = np.maximum(regret[cell] + (exiting - expected, staying - expected), 0.0)
+        row[0] = max(row[0] + (exiting - expected), 0.0)
+        row[1] = max(row[1] + (staying - expected), 0.0)
         return expected
 
     iterates, averages = [], []
@@ -128,12 +129,13 @@ def solve(
             # The iteration is its own weight in the average, which is the linear weighting.
             walk(auction.root(), traverser, tuple(auction.profiles[drawn]), drawn, float(iteration))
         if iteration % trace_every == 0:
-            iterates.append(matched(regret)[cells])
-            averages.append(averaged(strategy_sum, regret)[cells])
+            table = np.array(regret)
+            iterates.append(matched(table)[cells])
+            averages.append(averaged(np.array(strategy_sum), table)[cells])
+    table = np.array(regret)
     return Solved(
-        profile=averaged(strategy_sum, regret)[cells],
-        regrets=regret[cells],
-        visits=visits,
+        profile=averaged(np.array(strategy_sum), table)[cells],
+        regrets=table[cells],
         iterates=np.array(iterates),
         averages=np.array(averages),
         seed=seed,

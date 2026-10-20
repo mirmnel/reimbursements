@@ -237,7 +237,7 @@ def trace_panels() -> None:
             runs = [[p for p in at if p["reimbursement_policy"] == rule and p["seed"] == seed]
                     for seed in sorted({p["seed"] for p in at})]
             iterations = [p["iteration"] for p in runs[0]]
-            losses = np.array([[p["utility_loss"] for p in run] for run in runs])
+            losses = np.maximum([[p["utility_loss"] for p in run] for run in runs], 1e-12)  # below is round-off
             for loss in losses:
                 axis.plot(iterations, loss, color=RULE_COLOR[rule], linewidth=0.6, alpha=0.35)
             axis.plot(iterations, np.median(losses, axis=0), color=RULE_COLOR[rule], linewidth=2)
@@ -256,7 +256,7 @@ def trace_panels() -> None:
     for axis in axes.flat:
         axis.tick_params(which="both", labelsize=6.5)
         axis.title.set_fontsize(8)
-        axis.set_xticks([1_000, 10_000, 40_000], ["1k", "10k", "40k"], minor=False)
+        axis.set_xticks([1_000, 10_000, 100_000], ["1k", "10k", "100k"], minor=False)
         axis.set_xticks([], minor=True)
     handles = [Line2D([], [], color=MUTED, linewidth=0.8, linestyle=(0, (4, 3)), label=r"$\varepsilon$, or closed form")]
     handles += [Line2D([], [], color=color, linewidth=2, label=SCHEDULE_LABEL[name])

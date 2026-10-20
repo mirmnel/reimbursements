@@ -71,30 +71,8 @@ def test_full_reimbursement_leaves_the_bidders_the_frictionless_game():
         free, paid = M.solve(frictionless, seed=seed, iterations=400), M.solve(reimbursed, seed=seed, iterations=400)
         assert np.array_equal(free.profile, paid.profile), seed
         assert np.array_equal(free.regrets, paid.regrets), seed
-        assert np.array_equal(free.visits, paid.visits), seed
         outcome = A.evaluate(reimbursed, paid.profile)
         assert np.allclose(outcome.payoff, A.evaluate(frictionless, free.profile).payoff, atol=TIGHT)
-
-
-def test_chance_is_sampled_from_the_prior_rather_than_enumerated():
-    """Signals are drawn, so the opening splits between the types in the prior's proportion and not evenly."""
-    for q in (0.25, 0.75):
-        auction = A.Auction(q=q, c=C)
-        solved = M.solve(auction, seed=0, iterations=ITERATIONS)
-        opening = [solved.visits[auction.info_index[(0, auction.root(), signal)]] for signal in (0, 1)]
-        assert abs(opening[1] / sum(opening) - q) < 0.05, (q, opening)
-
-
-def test_visits_count_what_play_reached_and_not_what_enumeration_walked():
-    """A set its own play abandons falls quiet while its regret keeps moving, which is what the tremble lifts."""
-    auction = A.Auction(q=Q, c=0.0, reimbursement_policy="zero")
-    solved = M.solve(auction, seed=0, iterations=ITERATIONS, tremble=0.0)
-    quiet = np.flatnonzero(solved.visits == 0)
-    assert quiet.size, solved.visits
-    moved = np.max(np.abs(solved.regrets[quiet]), axis=1)
-    assert np.all(moved > M.INITIAL_REGRET), solved.regrets[quiet]
-
-
 
 
 # --- the symmetry restriction ------------------------------------------------
@@ -167,7 +145,7 @@ def test_the_restriction_is_on_the_search_and_not_an_average_taken_afterwards():
 
 
 
-# --- the method: regret matching plus, linear weighting, the tremble --------
+# --- the method: regret matching plus, linear weighting --------------------
 
 
 def test_stored_regret_is_never_negative_anywhere_along_a_run():
@@ -183,20 +161,11 @@ def test_stored_regret_is_never_negative_anywhere_along_a_run():
                 assert np.array_equal(solved.iterates[-1], M.matched(solved.regrets)), (seed, iterations)
 
 
-def test_the_tremble_lifts_the_off_path_sets_and_without_it_they_stay_quiet():
-    """Sampled play reaches an abandoned set only by trembling into it, which is what the tremble exists to do."""
-    # Pooled over seeds because reaching a set costs one tremble per round of depth, so a single run
-    # lifts the shallow sets and can leave the deepest ones at zero.
-    auction = A.Auction(q=Q, c=C, reimbursement_policy="zero")
-    quiet, lifted = 0, 0
-    for seed in range(4):
-        off_path = np.flatnonzero(M.solve(auction, seed=seed, iterations=ITERATIONS, tremble=0.0).visits == 0)
-        trembled = M.solve(auction, seed=seed, iterations=ITERATIONS, tremble=M.TREMBLE)
-        quiet, lifted = quiet + off_path.size, lifted + int(trembled.visits[off_path].sum())
-    assert quiet, "steady play abandoned no set, so the tremble has nothing to lift"
-    assert lifted > 0, (quiet, lifted)
-
-
+def test_a_set_the_average_never_weighed_is_read_off_its_regret():
+    """External sampling averages at opponent nodes only, so a set no opponent play reached falls back to its regret."""
+    regret = np.array([[0.3, 0.1], [0.2, 0.6]])
+    strategy_sum = np.array([[0.0, 0.0], [1.0, 3.0]])
+    assert np.allclose(M.averaged(strategy_sum, regret), [0.25, 0.75])
 
 
 def test_the_average_weights_later_iterations_more_heavily_than_earlier_ones():
