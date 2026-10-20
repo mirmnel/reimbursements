@@ -19,10 +19,10 @@ python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 
 | 2. Robustness: the ranking `Pi_T > max(Pi_0, Pi_full)` at learned play, refined near both bounds | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv` |
 | 3. Scale: at `n` in 3, 4, 6, solve `Gamma^0`, write the minimum-cost rule `r*`, and test whether learning recovers the reference | `experiments/scale.py` | `scale_rules.csv`, `scale.csv` |
 
-Every run is scored with one of three verdicts. `derived` means it is certified as an equilibrium and sits at the
-target. `different` means it is certified but is another equilibrium. `unsolved` means it is not certified.
-Certification is an exact best-response utility loss under `exact.CERTIFIED`, the paper's epsilon of `1e-3`. That
-check never reads a regret table, so a solver bug cannot certify itself.
+Every run gets one of three verdicts. `derived` means it reached an equilibrium that sits at the target, and the
+target is itself an equilibrium. `different` means it reached another equilibrium. `unsolved` means it did not reach
+an equilibrium. A run reaches an equilibrium when its exact best-response utility loss is under `exact.CERTIFIED`,
+the paper's epsilon of `1e-3`. That check never reads a regret table, so a solver bug cannot pass itself.
 
 ## The modules
 

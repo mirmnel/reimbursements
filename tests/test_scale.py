@@ -124,5 +124,13 @@ def test_the_verdict_reads_the_distance_it_is_handed_and_the_loss_decides_first(
     assert scale.verdict_on(3, 1.0, 0.3, distance=0.0, target_revenue=0.3) is Verdict.UNSOLVED
 
 
+def test_one_bidder_off_the_target_counts_as_fully_as_all_of_them():
+    """The distance is the worst bidder's, so the others matching cannot average one deviant away."""
+    auction = scale.auction_at(3, "full")
+    target = random_symmetric(auction, 4)
+    one = np.where([b == 0 for b, _, _ in auction.info_sets], 1.0 - target, target)
+    assert abs(scale.distance_from(auction, one, target) - scale.distance_from(auction, 1.0 - target, target)) < TIGHT
+
+
 if __name__ == "__main__":
     raise SystemExit(main(globals()))

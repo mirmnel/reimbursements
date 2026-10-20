@@ -409,7 +409,7 @@ def recovery_figure() -> None:
     distance.text(-0.55, STAY_BAR, " stay bar", fontsize=7, color=MUTED, va="bottom")
     scatter(distance, rows, lambda row: row["arrival_weighted_distance"])
     distance.set_ylim(bottom=0.0)
-    chrome(distance, "C. Distance to ref.", "bidders $n$", "arrival-weighted distance")
+    chrome(distance, "C. Distance to ref.", "bidders $n$", "worst bidder's weighted distance")
 
     handles = [Line2D([], [], color=ARM_COLOR[arm], linewidth=0, marker="o", label=ARM_LABEL[arm])
                for arm in (True, False)]

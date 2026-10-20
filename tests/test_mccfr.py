@@ -102,6 +102,13 @@ def test_a_set_the_average_never_weighed_is_read_off_its_regret():
     assert np.allclose(M.averaged(strategy_sum, regret), [0.25, 0.75])
 
 
+def test_sampling_noise_does_not_hold_sigma2_short_of_one():
+    """At sigma2 = 1 both actions tie, and a floor on regret once turned noise there into drift below 1."""
+    auction = game.Auction(q=Q, c=C, reimbursement_policy="zero")
+    profile = M.solve(auction, iterations=ITERATIONS, symmetry_restricted=True).profile
+    assert M.stay_schedule(auction, profile)["sigma2"] > 0.99
+
+
 # --- scoring a finished profile ---------------------------------------------
 
 
@@ -111,12 +118,10 @@ def bully(auction):
 
 
 def test_scoring_an_exact_target_finds_the_derived_equilibrium():
-    """Both distances fall to machine zero on a profile that is already the closed form."""
+    """A profile that is already the closed form scores as the paper's equilibrium, under every rule."""
     for name in game.REIMBURSEMENT_POLICIES:
         got = M.score(*target(name))
         assert got.utility_loss < TIGHT, (name, got)
-        assert got.on_path_distance == 0.0, (name, got)
-        assert got.revenue_distance < TIGHT, (name, got)
         assert got.verdict is M.Verdict.DERIVED, (name, got)
 
 
@@ -162,7 +167,6 @@ def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
     # The low type's last round, which the target leaves at zero reach and no budget ever informs.
     stray[auction.info_index[(0, auction.states[3], 0)]] = 1.0
     got = M.score(auction, stray)
-    assert got.on_path_distance == 0.0, got
     assert got.verdict is M.Verdict.DERIVED, got
 
 

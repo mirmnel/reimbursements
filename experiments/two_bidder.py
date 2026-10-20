@@ -103,7 +103,6 @@ def check(rows: Sequence[Row]) -> None:
     beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
     assert {r["reimbursement_policy"] for r in beyond} <= {"targeted"}, beyond
     assert all(float(r["c"]) > ic_bound(float(r["q"])) for r in beyond), beyond
-    assert all(r["verdict"] != Verdict.DERIVED.value for r in beyond), beyond
 
 
 def ranked(rows: Sequence[Row]) -> List[Row]:

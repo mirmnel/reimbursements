@@ -34,7 +34,8 @@ class Solved:
 
 
 def matched(regret: np.ndarray) -> np.ndarray:
-    """Stay with probability proportional to the regret of not having stayed, which the table already floors."""
+    """Stay with probability proportional to the positive regret of not having stayed."""
+    regret = np.maximum(regret, 0.0)
     total = regret.sum(-1)
     # Nothing regretted yet, so no reason to lean either way.
     return np.divide(regret[..., STAY], total, out=np.full(np.shape(total), 0.5), where=total > 0.0)
@@ -42,8 +43,8 @@ def matched(regret: np.ndarray) -> np.ndarray:
 
 def matched_one(regret: list) -> float:
     """``matched`` on one information set's [exit, stay] pair, in plain floats for the traversal."""
-    total = regret[0] + regret[1]
-    return regret[1] / total if total > 0.0 else 0.5
+    exiting, staying = max(regret[0], 0.0), max(regret[1], 0.0)
+    return staying / (exiting + staying) if exiting + staying > 0.0 else 0.5
 
 
 def averaged(strategy_sum: np.ndarray, regret: np.ndarray) -> np.ndarray:
@@ -69,7 +70,7 @@ def solve(
     trace_every: int = TRACE_EVERY,
     symmetry_restricted: bool = False,
 ) -> Solved:
-    """Run external-sampling MCCFR with regret matching plus and linear weighting, sampling opponents on-policy."""
+    """Run external-sampling MCCFR with regret matching and linear averaging, sampling opponents on-policy."""
     # Restricted, every bidder reads and writes one shared table, so the search is symmetric by
     # construction rather than a finished profile being averaged. Unrestricted, each has its own.
     rng = np.random.default_rng(seed)
@@ -111,8 +112,9 @@ def solve(
         stay = matched_one(row)
         staying, exiting = value(sampled | 1 << active.index(traverser)), value(sampled)
         expected = stay * staying + (1.0 - stay) * exiting
-        row[0] = max(row[0] + (exiting - expected), 0.0)
-        row[1] = max(row[1] + (staying - expected), 0.0)
+        # Not floored as in RM+, which turns sampling noise at an indifferent set into drift.
+        row[0] += exiting - expected
+        row[1] += staying - expected
         return expected
 
     averages = []
@@ -144,9 +146,7 @@ class Score:
 
     verdict: Verdict
     utility_loss: float  # exact, by best response over the tree, never reading a regret table
-    on_path_distance: float  # furthest a stay probability sits from the closed form, where the target plays
     revenue: float  # seller net revenue
-    revenue_distance: float  # how far that sits from the closed form of this auction's rule
 
 
 def closed_forms(auction: Auction) -> Tuple[np.ndarray, float]:
@@ -180,31 +180,19 @@ def visit_probability(auction: Auction, sigma: np.ndarray) -> np.ndarray:
     )
 
 
-def score(
-    auction: Auction,
-    sigma: np.ndarray,
-    stay_bar: float = STAY_BAR,
-    revenue_bar: float = REVENUE_BAR,
-) -> Score:
+def score(auction: Auction, sigma: np.ndarray) -> Score:
     """Judge a behaviour profile against the closed forms, by a path that never reads a regret table."""
     derived, earnings = closed_forms(auction)
     loss = float(utility_loss(auction, sigma))
     # Measured where the target plays, as the paper's on-path distance. Off the path the closed form
     # is an arbitrary tie-break the run has no experience of.
     on_path = visit_probability(auction, derived) > RESOLVED
-    on_path_distance = float(np.abs(sigma - derived)[on_path].max())
     revenue = evaluate(auction, sigma).revenue
-    revenue_distance = abs(revenue - earnings)
+    near = np.abs(sigma - derived)[on_path].max() <= STAY_BAR and abs(revenue - earnings) <= REVENUE_BAR
     if loss > CERTIFIED:
         verdict = Verdict.UNSOLVED
-    elif on_path_distance <= stay_bar and revenue_distance <= revenue_bar:
+    elif near and utility_loss(auction, derived) <= CERTIFIED:
         verdict = Verdict.DERIVED
     else:
         verdict = Verdict.DIFFERENT
-    return Score(
-        verdict=verdict,
-        utility_loss=loss,
-        on_path_distance=on_path_distance,
-        revenue=revenue,
-        revenue_distance=revenue_distance,
-    )
+    return Score(verdict=verdict, utility_loss=loss, revenue=revenue)
