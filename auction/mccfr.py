@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
@@ -13,10 +13,9 @@ from .exact import CERTIFIED, RESOLVED, evaluate, reach, utility_loss
 from .game import Auction, State, payoff_scale
 
 
-EXIT, STAY = 0, 1
+STAY = 1
 
 INITIAL_REGRET = 0.1  # width of the interval initial regrets are drawn from at two bidders, one draw per seed
-ITERATIONS = 2000
 TRACE_EVERY = 20
 
 BUDGET = 100_000  # iterations every run gets
@@ -30,12 +29,8 @@ class Solved:
     """What one run produced, with what is needed to judge it."""
 
     profile: np.ndarray  # average behavioural strategy, flat over the information sets
-    regrets: np.ndarray  # (|I|, 2) regret of exiting and of staying, as the run left them
-    iterates: np.ndarray  # (sample, |I|) the regret-matched profile along the run
-    averages: np.ndarray  # the same for the average profile
-    seed: int
+    averages: np.ndarray  # (sample, |I|) the average profile along the run
     iterations: int
-    symmetry_restricted: bool = False
 
 
 def matched(regret: np.ndarray) -> np.ndarray:
@@ -70,8 +65,7 @@ def shared_cells(auction: Auction) -> np.ndarray:
 def solve(
     auction: Auction,
     seed: int = 0,
-    iterations: int = ITERATIONS,
-    initial_regret: Optional[float] = None,
+    iterations: int = BUDGET,
     trace_every: int = TRACE_EVERY,
     symmetry_restricted: bool = False,
 ) -> Solved:
@@ -79,8 +73,7 @@ def solve(
     # Restricted, every bidder reads and writes one shared table, so the search is symmetric by
     # construction rather than a finished profile being averaged. Unrestricted, each has its own.
     rng = np.random.default_rng(seed)
-    if initial_regret is None:
-        initial_regret = INITIAL_REGRET * payoff_scale(auction.n)
+    initial_regret = INITIAL_REGRET * payoff_scale(auction.n)
     index = auction.info_index
     cells = shared_cells(auction) if symmetry_restricted else np.arange(len(auction.info_sets))
     cell_of = cells.tolist()  # plain ints, which the traversal indexes with far more cheaply
@@ -122,31 +115,19 @@ def solve(
         row[1] = max(row[1] + (staying - expected), 0.0)
         return expected
 
-    iterates, averages = [], []
+    averages = []
     for iteration in range(1, iterations + 1):
         for traverser in range(auction.n):
             drawn = int(rng.choice(auction.num_profiles, p=auction.prior))
             # The iteration is its own weight in the average, which is the linear weighting.
             walk(auction.root(), traverser, tuple(auction.profiles[drawn]), drawn, float(iteration))
         if iteration % trace_every == 0:
-            table = np.array(regret)
-            iterates.append(matched(table)[cells])
-            averages.append(averaged(np.array(strategy_sum), table)[cells])
-    table = np.array(regret)
+            averages.append(averaged(np.array(strategy_sum), np.array(regret))[cells])
     return Solved(
-        profile=averaged(np.array(strategy_sum), table)[cells],
-        regrets=table[cells],
-        iterates=np.array(iterates),
+        profile=averaged(np.array(strategy_sum), np.array(regret))[cells],
         averages=np.array(averages),
-        seed=seed,
         iterations=iterations,
-        symmetry_restricted=symmetry_restricted,
     )
-
-
-# ---------------------------------------------------------------------------
-# Scoring, kept apart from solving so that an exact profile can be scored for free
-# ---------------------------------------------------------------------------
 
 
 class Verdict(str, Enum):
@@ -164,31 +145,19 @@ class Score:
     verdict: Verdict
     utility_loss: float  # exact, by best response over the tree, never reading a regret table
     on_path_distance: float  # furthest a stay probability sits from the closed form, where the target plays
-    off_path_distance: float  # the same where it does not, which no budget informs and no bar reads
     revenue: float  # seller net revenue
     revenue_distance: float  # how far that sits from the closed form of this auction's rule
 
 
 def closed_forms(auction: Auction) -> Tuple[np.ndarray, float]:
     """The two-bidder example's closed-form profile and seller net revenue under this auction's rule."""
-    if (auction.n, auction.rounds, auction.delta) != (2, 4, 0.5):
-        raise ValueError(
-            f"the closed forms describe the two-bidder example, not {auction.n} bidders over "
-            f"{auction.rounds} rounds at a tick of {auction.delta}"
-        )
     rule = auction.reimbursement_policy
-    if rule not in game.PI:
-        raise ValueError(f"no closed form for the reimbursement policy {rule!r}")
-    if not auction.independent_signals:
-        raise ValueError("the published closed forms assume independent signals, so a correlated prior has none")
     derived = game.profile(auction, game.closed_form_strategy(rule, auction.c))
     return derived, game.PI[rule](auction.c, auction.q)
 
 
 def stay_schedule(auction: Auction, sigma: np.ndarray) -> Dict[str, float]:
     """The stay probabilities the two-bidder closed forms are stated as, read off one bidder."""
-    if auction.n != 2:
-        raise ValueError(f"the closed forms name these probabilities at two bidders, not {auction.n}")
     # At two bidders a round has exactly one history, so the round indexes the states directly.
     stay = lambda round_index, signal: float(sigma[auction.info_index[(0, auction.states[round_index], signal)]])
     return {
@@ -223,8 +192,7 @@ def score(
     # Measured where the target plays, as the paper's on-path distance. Off the path the closed form
     # is an arbitrary tie-break the run has no experience of.
     on_path = visit_probability(auction, derived) > RESOLVED
-    distance = np.abs(sigma - derived)
-    on_path_distance, off_path_distance = float(distance[on_path].max()), float(distance[~on_path].max())
+    on_path_distance = float(np.abs(sigma - derived)[on_path].max())
     revenue = evaluate(auction, sigma).revenue
     revenue_distance = abs(revenue - earnings)
     if loss > CERTIFIED:
@@ -237,7 +205,6 @@ def score(
         verdict=verdict,
         utility_loss=loss,
         on_path_distance=on_path_distance,
-        off_path_distance=off_path_distance,
         revenue=revenue,
         revenue_distance=revenue_distance,
     )

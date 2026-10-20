@@ -28,17 +28,6 @@ check never reads a regret table, so a solver bug cannot certify itself.
 
 The library lives in `auction/`. The scripts in `experiments/` run the experiments and draw the figures.
 
-| module | holds |
-|---|---|
-| `auction/game.py` | the public histories, the auction, the published reimbursement rules, and the two-bidder closed forms |
-| `auction/symmetric.py` | exact evaluation of a symmetric profile on exit-round orbits, which is what makes six bidders tractable |
-| `auction/exact.py` | exact evaluation on histories, the best response, and utility loss |
-| `auction/mccfr.py` | the external-sampling MCCFR solver and the verdict on what it returns |
-| `auction/implement.py` | the linear program for the cheapest per-orbit rule that keeps a target profile an equilibrium |
-| `experiments/two_bidder.py` | experiments 1 and 2 |
-| `experiments/scale.py` | experiment 3 |
-| `experiments/plots.py` | every figure |
-
 An information set is a bidder's own signal together with the public history: the round, who is still in, and the
 round each departed bidder left in. A symmetric profile under an exchangeable prior and an orbit-measurable rule is
 evaluated on orbits. Anything else is evaluated by enumerating the histories, which is exact but out of reach

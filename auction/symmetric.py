@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .game import Auction, Outcome
+from .game import Auction, Outcome, bucket_means
 
 
 TOLERANCE = 1e-12  # how far a profile may sit from its bucket mean and still be symmetric
@@ -29,31 +29,14 @@ def thinning(count: int, probability: float) -> np.ndarray:
     return coefficients * probability**survivors * (1.0 - probability) ** (count - survivors)
 
 
-# ---------------------------------------------------------------------------
-# Symmetry
-# ---------------------------------------------------------------------------
-
-
-def bucket_means(index: np.ndarray, size: int, sigma: np.ndarray) -> np.ndarray:
-    """Mean of ``sigma`` in each of ``size`` buckets, leaving empty buckets at zero."""
-    totals = np.bincount(index, weights=sigma, minlength=size)
-    counts = np.bincount(index, minlength=size)
-    return np.divide(totals, counts, out=np.zeros(size), where=counts > 0)
-
-
 def anonymise(auction: Auction, sigma: np.ndarray) -> np.ndarray:
     """Mean stay probability of ``sigma`` in each (orbit, signal) bucket."""
     return bucket_means(auction.orbit_index, len(auction.orbits) * 2, sigma).reshape(-1, 2)
 
 
-def broadcast(auction: Auction, stay: np.ndarray) -> np.ndarray:
-    """The flat profile in which every bidder plays its own orbit's entry of ``stay``."""
-    return stay.ravel()[auction.orbit_index]
-
-
 def symmetrise(auction: Auction, sigma: np.ndarray) -> np.ndarray:
     """The symmetric profile in which every bidder plays the bucket mean of ``sigma``."""
-    return broadcast(auction, anonymise(auction, sigma))
+    return anonymise(auction, sigma).ravel()[auction.orbit_index]
 
 
 def is_symmetric(auction: Auction, sigma: np.ndarray) -> bool:
@@ -64,26 +47,6 @@ def is_symmetric(auction: Auction, sigma: np.ndarray) -> bool:
 def applies(auction: Auction, sigma: np.ndarray) -> bool:
     """Whether the reduction is valid here, which needs symmetry, an exchangeable prior and an orbit rule."""
     return auction.exchangeable_signals and auction.orbit_measurable and is_symmetric(auction, sigma)
-
-
-def requires_exchangeability(auction: Auction) -> None:
-    """Refuse the reduction where relabelling the bidders changes the prior or the reimbursement rule."""
-    if not auction.exchangeable_signals:
-        raise ValueError(
-            "the orbit reduction reads the signal profile through its high-signal count alone, which a "
-            "prior that is not exchangeable breaks. Evaluate on histories instead, by way of "
-            "exact.evaluate or exact.utility_loss"
-        )
-    if not auction.orbit_measurable:
-        raise ValueError(
-            "the orbit reduction pays one reimbursement per orbit, which a rule separating histories "
-            "inside an orbit breaks. Evaluate on histories instead, by way of exact.evaluate"
-        )
-
-
-def refunds_of(auction: Auction, refunds: Optional[np.ndarray]) -> np.ndarray:
-    """The per-orbit reimbursement to evaluate under, being the auction's own unless one is supplied."""
-    return auction.orbit_reimburses if refunds is None else refunds
 
 
 @lru_cache(maxsize=None)
@@ -101,11 +64,6 @@ def arrangements(auction: Auction) -> np.ndarray:
     return np.array([_arrangements(auction.n, departed) for _, departed in auction.orbits])
 
 
-# ---------------------------------------------------------------------------
-# Seller accounting on orbits
-# ---------------------------------------------------------------------------
-
-
 def _onward(auction: Auction, orbit: int, leaving: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Where each number of departures leads, and whether the auction carries on at all."""
     onward = auction.onward_orbit[orbit][leaving]
@@ -116,8 +74,7 @@ def seller_values(
     auction: Auction, stay: np.ndarray, refunds: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Expected price and reimbursement from each orbit onward."""
-    requires_exchangeability(auction)
-    paid = refunds_of(auction, refunds)
+    paid = auction.orbit_view if refunds is None else refunds
     shape = (len(auction.orbits), auction.n + 1)
     price, payout = np.zeros(shape), np.zeros(shape)
     for orbit in reversed(range(len(auction.orbits))):
@@ -136,11 +93,6 @@ def seller_values(
                 thin * (stayers * refund + np.where(carries, payout[safe, survivors], 0.0))
             )
     return price, payout
-
-
-# ---------------------------------------------------------------------------
-# One tagged bidder against an otherwise symmetric population
-# ---------------------------------------------------------------------------
 
 
 def branches_at(
@@ -180,8 +132,7 @@ def tagged_values(
     refunds: Optional[np.ndarray] = None,
 ) -> Values:
     """A tagged bidder's payoff from each orbit, as a constant and a coefficient on the value."""
-    requires_exchangeability(auction)
-    paid = refunds_of(auction, refunds)
+    paid = auction.orbit_view if refunds is None else refunds
     values = empty_values(auction)
     for orbit in reversed(range(len(auction.orbits))):
         own = deviation[orbit, signal]
@@ -196,7 +147,6 @@ def tagged_reach(
     auction: Auction, stay: np.ndarray, signal: int, own: Optional[np.ndarray] = None
 ) -> Values:
     """Reach of each orbit for a tagged bidder playing ``own``, and the same weighted by value."""
-    requires_exchangeability(auction)
     n, others = auction.n, auction.n - 1
     mass = np.zeros((len(auction.orbits), n))
     value_mass = np.zeros_like(mass)
@@ -230,7 +180,6 @@ def signal_weight(auction: Auction, signal: int) -> float:
 
 def combine(auction: Auction, values: Values, signal: int) -> float:
     """Average a tagged bidder's opening value over how many others drew a high signal."""
-    requires_exchangeability(auction)
     const, coefficient = values
     high = np.arange(auction.n)
     # Conditional on the tagged bidder's own signal, since the caller weights by that separately.
@@ -244,11 +193,6 @@ def tagged_payoff(
 ) -> float:
     """Payoff of a tagged bidder holding ``signal`` and playing ``deviation`` against ``stay``."""
     return combine(auction, tagged_values(auction, stay, deviation, signal, refunds), signal)
-
-
-# ---------------------------------------------------------------------------
-# The public reduction
-# ---------------------------------------------------------------------------
 
 
 def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
@@ -279,7 +223,7 @@ def gains(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Deviation gain and the reach weighting it, per history of that orbit, at each information set."""
     stay = anonymise(auction, sigma)
-    paid = refunds_of(auction, refunds)
+    paid = auction.orbit_view if refunds is None else refunds
     gain = np.zeros((len(auction.orbits), 2))
     reach = np.zeros_like(gain)
     for signal in (0, 1):
@@ -302,7 +246,7 @@ def best_response(auction: Auction, stay: np.ndarray, signal: int) -> np.ndarray
     """A tagged bidder's best response to a symmetric profile, by a backward sweep on orbits."""
     response = stay.copy()
     mass, value_mass = tagged_reach(auction, stay, signal)
-    paid = auction.orbit_reimburses
+    paid = auction.orbit_view
     values = empty_values(auction)
     for orbit in reversed(range(len(auction.orbits))):
         gain, branches = 0.0, {}

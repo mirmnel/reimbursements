@@ -7,7 +7,7 @@ from typing import Dict
 import numpy as np
 
 from . import symmetric
-from .game import REIMBURSEMENT_POLICIES, Auction, Outcome, State, payoff_scale
+from .game import Auction, Outcome, State, payoff_scale
 
 CERTIFIED = 1e-3  # the paper's epsilon: the utility loss a certified two-bidder profile clears
 RESOLVED = 1e-12  # the least counterfactual reach a gain can be divided by without amplifying noise
@@ -16,11 +16,6 @@ RESOLVED = 1e-12  # the least counterfactual reach a gain can be divided by with
 def certified(n: int = 2) -> float:
     """``CERTIFIED`` at ``n`` bidders, stretched with the payoffs so every count is held to one bar."""
     return CERTIFIED * payoff_scale(n)
-
-
-# ---------------------------------------------------------------------------
-# Exact evaluation of a behaviour profile
-# ---------------------------------------------------------------------------
 
 
 def evaluate(auction: Auction, sigma: np.ndarray) -> Outcome:
@@ -71,11 +66,6 @@ def reach(auction: Auction, sigma: np.ndarray) -> Dict[State, np.ndarray]:
     return reached
 
 
-# ---------------------------------------------------------------------------
-# Counterfactual deviation values
-# ---------------------------------------------------------------------------
-
-
 def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> float:
     """Gain from staying rather than exiting at ``position``, weighted by opponent reach only."""
     if symmetric.applies(auction, sigma):
@@ -90,11 +80,6 @@ def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> f
     staying, exiting = base.copy(), base.copy()
     staying[position], exiting[position] = 1.0, 0.0
     return float(evaluate(auction, staying).payoff[bidder] - evaluate(auction, exiting).payoff[bidder])
-
-
-# ---------------------------------------------------------------------------
-# Best responses and equilibrium quality
-# ---------------------------------------------------------------------------
 
 
 def best_response(auction: Auction, sigma: np.ndarray, bidder: int) -> np.ndarray:

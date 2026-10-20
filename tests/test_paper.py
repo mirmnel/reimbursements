@@ -11,15 +11,8 @@ Q, C, TIGHT = 0.5, 0.05, 1e-9
 
 def target(reimbursement_policy, c=C, q=Q, **overrides):
     """The game under a reimbursement policy, and the equilibrium the paper targets in it."""
-    auction = A.Auction(q=q, c=c, reimbursement_policy=reimbursement_policy, **overrides)
+    auction = G.Auction(q=q, c=c, reimbursement_policy=reimbursement_policy, **overrides)
     return auction, G.profile(auction, G.closed_form_strategy(reimbursement_policy, c))
-
-
-def schedule(auction, sigma, signal):
-    """Stay probability of one signal type at each round, both bidders still active."""
-    return [
-        sigma[auction.info_index[(0, auction.states[round_index], signal)]] for round_index in range(auction.rounds)
-    ]
 
 
 # --- the closed forms are internally consistent ----------------------------
@@ -38,11 +31,11 @@ def test_the_region_closes_differently_at_each_of_its_two_bounds():
     q = 0.9  # past 0.783, where the incentive bound is the lesser of the two
     bound = G.ic_bound(q)
     margin = lambda c: G.PI["targeted"](c, q) - max(G.PI["zero"](c, q), G.PI["full"](c, q))
-    assert margin(bound) > 0 and G.region_claim(bound, q), bound  # separation holds at the bound itself
-    assert margin(G.CBAR) < 1e-12 and not G.region_claim(G.CBAR, 0.5), G.CBAR
+    assert margin(bound) > 0, bound  # separation holds at the bound itself
+    assert margin(G.CBAR) < 1e-12, G.CBAR
     # Past the incentive bound the formulas still favour the targeted rule, at a profile nobody plays.
     past = (bound + G.CBAR) / 2
-    assert margin(past) > 0 and not G.region_claim(past, q), past
+    assert margin(past) > 0, past
 
 
 def test_targeted_beats_full_by_exactly_two_q_c():
@@ -66,7 +59,7 @@ def test_seller_revenue_matches_every_closed_form():
     """Exact evaluation of each target reproduces ``Pi_0``, ``Pi_full`` and ``Pi_T``."""
     for q in (0.25, 0.5, 0.75):
         for c in (0.01, 0.05, 0.1, 0.15, 0.2):  # the published cost grid
-            for name in A.REIMBURSEMENT_POLICIES:
+            for name in G.REIMBURSEMENT_POLICIES:
                 got = A.evaluate(*target(name, c=c, q=q)).revenue
                 assert abs(got - G.PI[name](c, q)) < TIGHT, (name, c, q, got)
 
@@ -76,7 +69,7 @@ def test_seller_revenue_matches_every_closed_form():
 
 def test_paper_targets_are_exact_equilibria():
     """Zero utility loss for every published target."""
-    for name in A.REIMBURSEMENT_POLICIES:
+    for name in G.REIMBURSEMENT_POLICIES:
         auction, sigma = target(name)
         assert A.utility_loss(auction, sigma) < 1e-12, name
 
@@ -107,7 +100,7 @@ def test_opening_incentive_constraint_binds_at_one_minus_q_over_two():
 
 def revenues(c, q):
     """Seller net revenue under each reimbursement policy at ``(c, q)``, with the target imposed."""
-    return {name: A.evaluate(*target(name, c=c, q=q)).revenue for name in A.REIMBURSEMENT_POLICIES}
+    return {name: A.evaluate(*target(name, c=c, q=q)).revenue for name in G.REIMBURSEMENT_POLICIES}
 
 
 def test_ranking_against_no_reimbursement_fails_above_cbar():

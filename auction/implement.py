@@ -31,8 +31,6 @@ class Implementation:
     refunds: np.ndarray  # what the rule pays per stay at each orbit
     bill: float  # expected reimbursement under the target, which is the objective
     full_bill: float  # the same under full reimbursement, which is always feasible here
-    slack: float  # how far from optimal a prescribed action was allowed to sit
-    constraints: int  # sequential-rationality constraints the program carried
     status: str
 
 
@@ -66,15 +64,14 @@ def trembled(sigma: np.ndarray, tremble: float) -> np.ndarray:
     return (1.0 - tremble) * sigma + tremble * 0.5
 
 
-def sequential_rationality(
-    auction: Auction, sigma: np.ndarray, floor: float, tremble: float
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def sequential_rationality(auction: Auction, sigma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """One row per action the target prescribes, bounding what deviating from it may be worth."""
     stay = np.clip(symmetric.anonymise(auction, sigma), 0.0, 1.0)
     base, slope, reach = gain_coefficients(auction, sigma)
-    off_base, off_slope, off_reach = gain_coefficients(auction, sigma, trembled(sigma, tremble))
+    off_base, off_slope, off_reach = gain_coefficients(auction, sigma, trembled(sigma, BELIEF_TREMBLE))
     full = np.full(len(auction.orbits), auction.c)
-    rows, bounds, allowed = [], [], np.zeros_like(stay)
+    floor = certified(auction.n)
+    rows, bounds = [], []
     for orbit in range(len(auction.orbits)):
         for signal in (0, 1):
             on_path = reach[orbit, signal] > RESOLVED
@@ -89,24 +86,19 @@ def sequential_rationality(
             # trillion does not enter the program with coefficients a trillion times smaller.
             normalised, slopes = constant / weight, coefficient / weight
             at_full = one_shot_regret(normalised + slopes @ full, stay[orbit, signal])
-            allowed[orbit, signal] = max(floor, at_full) + FEASIBILITY_MARGIN
+            allowed = max(floor, at_full) + FEASIBILITY_MARGIN
             # one_shot_regret at this set stays inside the allowance exactly on this pair.
             for sign, mixed in ((1.0, 1.0 - stay[orbit, signal]), (-1.0, stay[orbit, signal])):
                 if mixed > MIXED_FLOOR:
                     rows.append(sign * slopes)
-                    bounds.append(allowed[orbit, signal] / mixed - sign * normalised)
-    return np.array(rows), np.array(bounds), allowed
+                    bounds.append(allowed / mixed - sign * normalised)
+    return np.array(rows), np.array(bounds)
 
 
-def minimum_cost(
-    auction: Auction, sigma: np.ndarray, floor: Optional[float] = None, tremble: float = BELIEF_TREMBLE
-) -> Implementation:
+def minimum_cost(auction: Auction, sigma: np.ndarray) -> Implementation:
     """Solve for the cheapest per-orbit reimbursement leaving every action the target prescribes optimal."""
-    symmetric.requires_exchangeability(auction)
-    if floor is None:
-        floor = certified(auction.n)
     objective = stay_mass(auction, sigma)
-    rows, bounds, allowed = sequential_rationality(auction, sigma, floor, tremble)
+    rows, bounds = sequential_rationality(auction, sigma)
     solution = linprog(objective, A_ub=rows, b_ub=bounds, bounds=(0.0, auction.c), method="highs")
     chosen = solution.x if solution.success else np.full(len(auction.orbits), auction.c)
     refunds = np.clip(chosen, 0.0, auction.c)  # the bounds the program was given, past its own rounding
@@ -114,8 +106,6 @@ def minimum_cost(
         refunds=refunds,
         bill=float(objective @ refunds),
         full_bill=float(objective.sum() * auction.c),
-        slack=float(allowed.max()),
-        constraints=len(bounds),
         status="optimal" if solution.success else solution.message,
     )
 

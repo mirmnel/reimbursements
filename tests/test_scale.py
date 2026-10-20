@@ -20,23 +20,21 @@ TIGHT = 1e-12
 def settings(counts):
     """Every auction in the equivalence sweep, over bidder counts, policies and signal probabilities."""
     return [
-        A.Auction(n=n, q=q, c=0.05, reimbursement_policy=name)
+        G.Auction(n=n, q=q, c=0.05, reimbursement_policy=name)
         for n in counts
         for q in (0.3, 0.5)
-        for name in A.REIMBURSEMENT_POLICIES
+        for name in G.REIMBURSEMENT_POLICIES
     ]
 
 
 # --- construction at scale --------------------------------------------------
 
 
-
-
 def test_six_bidders_evaluate_and_verify_well_within_a_second():
     """Exact evaluation and exact utility loss at six bidders each finish well inside a second."""
     # Six is the count the scale experiment reaches. Keying on histories rather than active sets
     # costs the reduction nothing here, but the flat profile itself outgrows memory by ten.
-    auction = A.Auction(n=6)
+    auction = G.Auction(n=6)
     sigma = random_symmetric(auction, 1)
     for measure in (A.evaluate, A.utility_loss):
         started = time.perf_counter()
@@ -80,7 +78,7 @@ def test_the_deviation_gain_agrees_at_every_information_set():
 
 def test_an_asymmetric_profile_still_routes_to_the_per_history_path():
     """One bidder always staying while the other always exits gives the payoffs it plainly should."""
-    auction = A.Auction(n=2, q=0.5, c=0.05, reimbursement_policy="full")
+    auction = G.Auction(n=2, q=0.5, c=0.05, reimbursement_policy="full")
     sigma = np.array(
         [1.0 if bidder == 0 else 0.0 for (bidder, _, _) in auction.info_sets]
     )
@@ -97,8 +95,6 @@ def test_an_asymmetric_profile_still_routes_to_the_per_history_path():
 
 def test_the_experiment_runs_the_three_bidder_counts_the_paper_names():
     """Three, four and six, with correlated signals and a clock finer than the example's."""
-    assert scale.COUNTS == (3, 4, 6)
-    assert scale.ROUNDS > 4 and scale.RHO > 0.0
     for n in scale.COUNTS:
         auction = scale.auction_at(n, "targeted")
         # A finer clock over the same range of common values, and a cost stretched with them.

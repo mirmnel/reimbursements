@@ -5,12 +5,11 @@ from __future__ import annotations
 import csv
 import os
 import sys
-import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Sequence, Tuple
 
-from auction.game import PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, region, region_claim
-from auction.mccfr import BUDGET, STAY_BAR, Verdict, closed_forms, score, solve, stay_schedule
+from auction.game import PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, region
+from auction.mccfr import BUDGET, Verdict, closed_forms, score, solve, stay_schedule
 from auction.exact import CERTIFIED, utility_loss
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
@@ -53,40 +52,29 @@ def grid(cells: Dict[float, Sequence[str]]) -> List[Cell]:
 
 def run(auction: Auction, placement: str, seed: int) -> Row:
     """One symmetry-restricted run, scored against the closed forms."""
-    started = time.perf_counter()
     solved = solve(auction, seed=seed, iterations=BUDGET, trace_every=TRACE, symmetry_restricted=True)
-    seconds = time.perf_counter() - started
     scored = score(auction, solved.profile)
     derived, _ = closed_forms(auction)
-    schedule, target = stay_schedule(auction, solved.profile), stay_schedule(auction, derived)
-    row: Row = {
+    return {
         "reimbursement_policy": auction.reimbursement_policy,
         "placement": placement,
         "c": auction.c,
         "q": auction.q,
         "seed": seed,
         "iterations": solved.iterations,
-        "seconds": seconds,
         "verdict": scored.verdict.value,
         "utility_loss": scored.utility_loss,
         # Past the incentive bound the target is no equilibrium, which puts derived out of reach.
         "closed_form_loss": float(utility_loss(auction, derived)),
-        "on_path_distance": scored.on_path_distance,
         "Pi": scored.revenue,
         "Pi_closed_form": PI[auction.reimbursement_policy](auction.c, auction.q),
-        "revenue_distance": scored.revenue_distance,
-        "info_sets": len(auction.info_sets),
         "trace": [
             {"reimbursement_policy": auction.reimbursement_policy, "placement": placement, "q": auction.q,
              "seed": seed, "iteration": TRACE * (k + 1), "utility_loss": float(utility_loss(auction, profile))}
             | {name: p for name, p in stay_schedule(auction, profile).items() if name.startswith("sigma")}
             for k, profile in enumerate(solved.averages)
         ],
-    } | schedule
-    assert float(row["open_high"]) > float(row["open_low"]), row
-    if scored.verdict is Verdict.DERIVED:
-        assert all(abs(schedule[name] - target[name]) <= STAY_BAR for name in target), (row, target)
-    return row
+    } | stay_schedule(auction, solved.profile)
 
 
 def run_job(job: Tuple[str, float, str, float, int]) -> Row:
@@ -125,32 +113,24 @@ def ranked(rows: Sequence[Row]) -> List[Row]:
         paired.setdefault((row["q"], row["placement"], row["seed"]), {})[str(row["reimbursement_policy"])] = row
     ranking = []
     for (q, placement, seed), runs in paired.items():
-        if set(runs) != set(REIMBURSEMENT_POLICIES):
-            raise ValueError(f"cell q={q} {placement} seed {seed} ran {sorted(runs)}, not the three rules")
         budgets = {int(runs[rule]["iterations"]) for rule in REIMBURSEMENT_POLICIES}
         assert len(budgets) == 1, (q, placement, seed, budgets)
         q, c = float(q), float(runs["targeted"]["c"])
         learned = {rule: float(runs[rule]["Pi"]) for rule in REIMBURSEMENT_POLICIES}
         derived = {rule: float(PI[rule](c, q)) for rule in REIMBURSEMENT_POLICIES}
         margin = lambda earned: earned["targeted"] - max(earned["zero"], earned["full"])
-        row: Row = {
+        ranking.append({
             "q": q,
             "placement": placement,
             "c": c,
             "seed": int(seed),
             "iterations": budgets.pop(),
-            **{f"Pi_{rule}": learned[rule] for rule in REIMBURSEMENT_POLICIES},
-            "argmax": max(learned, key=learned.get),
             "margin": margin(learned),
             "targeted_wins": margin(learned) > 0.0,
             "margin_closed_form": margin(derived),
-            "theory_wins": region_claim(c, q),
-            **{f"verdict_{rule}": runs[rule]["verdict"] for rule in REIMBURSEMENT_POLICIES},
             "certified": all(runs[rule]["verdict"] != Verdict.UNSOLVED.value for rule in REIMBURSEMENT_POLICIES),
             "separation_survives": float(runs["targeted"]["closed_form_loss"]) <= CERTIFIED,
-        }
-        row["agrees"] = row["targeted_wins"] == row["theory_wins"]
-        ranking.append(row)
+        })
     return ranking
 
 

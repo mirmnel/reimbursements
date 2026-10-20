@@ -25,7 +25,6 @@ FREE_SEEDS = 3  # seeds the unrestricted arm gets
 # The unrestricted arm runs only below this, since an asymmetric profile's exact utility loss
 # takes 46 s at 1728 information sets and days at 93312.
 EXACT_INFO_SETS = 5_000
-REACHED = 1e-6  # arrival probability below which a set counts as off the reference's path
 
 
 def auction_at(n: int, policy, c: float = C) -> Auction:
@@ -43,11 +42,6 @@ def verdict_on(n: int, loss: float, revenue: float, distance: float, target_reve
     if distance <= STAY_BAR and abs(revenue - target_revenue) <= REVENUE_BAR * payoff_scale(n):
         return Verdict.DERIVED
     return Verdict.DIFFERENT
-
-
-# ---------------------------------------------------------------------------
-# The reference profile and the rule written against it
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -84,17 +78,11 @@ def rule_row(reference: Reference) -> Dict[str, object]:
     chosen, under, free = reference.chosen, reference.under, reference.frictionless
     row: Dict[str, object] = {
         "n": reference.n,
-        "rounds": ROUNDS,
         "c": under.c,
-        "q": Q,
-        "rho": RHO,
-        "info_sets": len(under.info_sets),
         "reference_loss": float(utility_loss(free, reference.profile)),
-        "reference_price": evaluate(free, reference.profile).price,
         "status": chosen.status,
         "bill": chosen.bill,
         "full_bill": chosen.full_bill,
-        "saving": 1.0 - chosen.bill / chosen.full_bill,
         "target_revenue": evaluate(under, reference.profile).revenue,
         "target_loss_under_rule": float(utility_loss(under, reference.profile)),
     } | implement.schedule_of(under, chosen.refunds)
@@ -104,11 +92,6 @@ def rule_row(reference: Reference) -> Dict[str, object]:
     assert float(row["reference_loss"]) <= certified(reference.n), row
     assert float(row["target_loss_under_rule"]) <= certified(reference.n), row
     return row
-
-
-# ---------------------------------------------------------------------------
-# Whether learning recovers the reference under the rule written for it
-# ---------------------------------------------------------------------------
 
 
 def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str, object]:
@@ -130,15 +113,12 @@ def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str,
         "c": under.c,
         "seed": seed,
         "symmetry_restricted": restricted,
-        "seconds": seconds,
         "verdict": verdict_on(reference.n, loss, revenue, weighted_distance, target_revenue).value,
         "utility_loss": loss,
         "certified": loss <= certified(reference.n),
-        "on_path_distance": float(distance[arrived > REACHED].max()),
         "arrival_weighted_distance": weighted_distance,
         "Pi": revenue,
         "Pi_target": target_revenue,
-        "info_sets": len(under.info_sets),
     }
     print(f"  n={reference.n} seed={seed} {'restricted' if restricted else 'unrestricted':12s} "
           f"{row['verdict']:9s} loss {loss:.2e}  Pi {revenue:.4f}  {seconds:.0f} s")

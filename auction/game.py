@@ -67,14 +67,11 @@ def after(state: State, stayers: Tuple[int, ...]) -> State:
     return State(state.round + 1, stayers, exits)
 
 
-def bucket_constant(
-    index: np.ndarray, size: int, values: np.ndarray, tolerance: float = COARSENING_TOLERANCE
-) -> Union[np.ndarray, None]:
-    """One value per bucket where ``values`` is constant within every bucket, and ``None`` otherwise."""
+def bucket_means(index: np.ndarray, size: int, values: np.ndarray) -> np.ndarray:
+    """Mean of ``values`` in each of ``size`` buckets, leaving empty buckets at zero."""
     totals = np.bincount(index, weights=values, minlength=size)
     counts = np.bincount(index, minlength=size)
-    means = np.divide(totals, counts, out=np.zeros(size), where=counts > 0)
-    return means if np.max(np.abs(values - means[index])) <= tolerance else None
+    return np.divide(totals, counts, out=np.zeros(size), where=counts > 0)
 
 
 def orbit_of(state: State) -> Orbit:
@@ -151,17 +148,7 @@ class Auction:
     def prior(self) -> np.ndarray:
         """Probability of each signal profile, drawn jointly so that bidders may correlate."""
         law = self.signal_prior if self.signal_prior is not None else independent(self.q)
-        prior = np.asarray(law(self.profiles), dtype=float)
-        if prior.shape != (self.num_profiles,):
-            raise ValueError(f"the signal prior gave {prior.shape} probabilities, not ({self.num_profiles},)")
-        if prior.min() < 0.0 or abs(prior.sum() - 1.0) > PRIOR_TOLERANCE:
-            raise ValueError(f"the signal prior is not a distribution: it sums to {prior.sum()!r}")
-        return prior
-
-    @cached_property
-    def marginals(self) -> np.ndarray:
-        """Each bidder's own probability of drawing a high signal, under the joint prior."""
-        return self.profiles.T @ self.prior
+        return np.asarray(law(self.profiles), dtype=float)
 
     @cached_property
     def independent_signals(self) -> bool:
@@ -196,7 +183,7 @@ class Auction:
     @cached_property
     def high_probability(self) -> float:
         """A bidder's own probability of a high signal, which exchangeability makes common to all."""
-        return float(self.marginals[0])
+        return float(self.profiles[:, 0] @ self.prior)
 
     @property
     def num_profiles(self) -> int:
@@ -310,19 +297,13 @@ class Auction:
     def orbit_view(self) -> Union[np.ndarray, None]:
         """What the policy pays per orbit, or ``None`` where it separates histories inside one."""
         index = np.array([self.orbit_of_state[state] for state in self.states])
-        return bucket_constant(index, len(self.orbits), self.paid_by_state)
+        means = bucket_means(index, len(self.orbits), self.paid_by_state)
+        return means if np.max(np.abs(self.paid_by_state - means[index])) <= COARSENING_TOLERANCE else None
 
     @cached_property
     def orbit_measurable(self) -> bool:
         """Whether the policy pays the same at every history of an orbit, which the reduction needs."""
         return self.orbit_view is not None
-
-    @cached_property
-    def orbit_reimburses(self) -> np.ndarray:
-        """What the policy pays per stay at each orbit, which needs it constant within one."""
-        if self.orbit_view is None:
-            raise ValueError("this reimbursement policy separates histories in one orbit, so it has no orbit view")
-        return self.orbit_view
 
     def release_history_tables(self) -> None:
         """Drop the per-history tables, which rebuild on demand and cost half a gigabyte at six bidders."""
@@ -374,11 +355,6 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
     return branch_payoffs, continuations
 
 
-
-# ---------------------------------------------------------------------------
-# The two-bidder example's closed forms and the strategies they are stated at
-# ---------------------------------------------------------------------------
-
 sigma1 = lambda c: 1 - 4 * c / 3
 sigma3 = lambda c: 1 - 4 * c
 R0 = lambda c: 0.5 * (1 - sigma1(c) ** 2) + sigma1(c) ** 2 * (1.5 + 0.5 * sigma3(c) ** 2)
@@ -398,13 +374,6 @@ CBAR = 0.10862915340160972
 def region(q: float) -> float:
     """The cost bound below which the targeted policy beats both comparison policies."""
     return min(CBAR, ic_bound(q))
-
-
-def region_claim(c: float, q: float) -> bool:
-    """Whether the theory puts the targeted policy ahead of both comparisons at this cost."""
-    # Strict at the cost root, where the revenues tie, and inclusive at the incentive bound, where
-    # separation still holds.
-    return 0.0 < c < CBAR and c <= ic_bound(q)
 
 
 def profile(auction: Auction, *strategies: Strategy) -> np.ndarray:
