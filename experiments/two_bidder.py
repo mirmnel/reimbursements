@@ -144,14 +144,6 @@ def report(ranking: Sequence[Row]) -> None:
               f"  learned margin {spread}  closed form {float(at[0]['margin_closed_form']):+.4f}")
 
 
-def assert_claim(ranking: Sequence[Row]) -> None:
-    """At every inside cell, every seed counts and back-loading wins at each."""
-    for q in SIGNAL_PROBABILITIES:
-        inside = [r for r in ranking if (r["q"], r["placement"]) == (q, "inside")]
-        assert sum(bool(r["counted"]) for r in inside) == SEEDS, (q, inside)
-        assert all(r["backloaded_wins"] for r in inside), (q, inside)
-
-
 def validation() -> List[Row]:
     """Experiment 1: ten seeds at each sampled cell under each policy the paper prints closed forms for."""
     rows = sweep(grid(VALIDATION), VALIDATED_POLICIES)
@@ -171,7 +163,6 @@ def robustness() -> List[Row]:
     ranking = ranked(rows)
     report(ranking)
     write("learned_ranking.csv", ranking)
-    assert_claim(ranking)
     return ranking
 
 

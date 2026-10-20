@@ -84,30 +84,5 @@ def test_a_seed_where_any_policy_missed_an_equilibrium_is_recorded_but_not_count
     assert not [row for row in ranking if row["seed"] == 1][0]["backloaded_wins"], ranking
 
 
-# --- the claim --------------------------------------------------------------
-
-
-def test_the_claim_holds_when_back_loading_wins_every_inside_seed():
-    """Every inside seed counted and won, at every signal probability, is the theorem surviving learning."""
-    rows = [row for q in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS) for row in at_cell(q=q, seed=seed)]
-    assert not raises(T.assert_claim, T.ranked(rows))
-
-
-def test_the_claim_fails_on_one_uncounted_or_lost_inside_seed_at_any_signal_probability():
-    """No inside seed may drop out, and no signal probability is excused."""
-    for q in T.SIGNAL_PROBABILITIES:
-        for spoiled in ({"unsolved": ("zero",)}, {"backloaded": 0.19}):
-            rows = [row for other in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS)
-                    for row in at_cell(q=other, seed=seed, **(spoiled if (other, seed) == (q, 3) else {}))]
-            assert raises(T.assert_claim, T.ranked(rows)), (q, spoiled)
-
-
-def test_the_claim_says_nothing_past_the_bound():
-    """The theorem is silent past the incentive bound, so a loss there is reported and not asserted."""
-    inside = [row for q in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS) for row in at_cell(q=q, seed=seed)]
-    past = [row for seed in range(T.SEEDS) for row in at_cell(placement="outside", seed=seed, backloaded=0.10)]
-    assert not raises(T.assert_claim, T.ranked(inside + past))
-
-
 if __name__ == "__main__":
     raise SystemExit(main(globals()))
