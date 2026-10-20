@@ -1,4 +1,4 @@
-"""Experiment 2's suite: the revenue ranking read off learned play."""
+"""Experiment 2's suite: the revenue ranking over the price-only corners, read off learned play."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from auction.mccfr import Verdict
 from test_paper import main
 
 
-def run_row(rule, q, placement, c, revenue, seed=0, verdict=Verdict.DERIVED, closed_form_loss=0.0):
+def run_row(rule, q, placement, c, revenue, seed, verdict=Verdict.DERIVED):
     """One run row of the shape the pipeline writes, carrying what the ranking reads off it."""
     return {
         "reimbursement_policy": rule,
@@ -20,67 +20,93 @@ def run_row(rule, q, placement, c, revenue, seed=0, verdict=Verdict.DERIVED, clo
         "seed": seed,
         "iterations": M.BUDGET,
         "verdict": verdict.value,
-        "closed_form_loss": closed_form_loss,
         "Pi": revenue,
+        "Pi_closed_form": 0.20 + 0.01 * (rule == "backloaded"),
     }
 
 
-def at_cell(revenues, q=0.5, placement="inside", c=None, seed=0, **overrides):
-    """One cell and seed's three runs, one per rule, at the revenues given."""
-    cost = G.region(q) * T.PLACEMENTS[placement] if c is None else c
-    return [run_row(rule, q, placement, cost, revenues[rule], seed, **overrides) for rule in REIMBURSEMENT_POLICIES]
+def at_cell(q=0.7, placement="inside", seed=0, unsolved=(), **revenues):
+    """One cell and seed's runs, one per policy, back-loaded earning 0.21 and the rest 0.20 unless given."""
+    cost = G.region(q) * T.PLACEMENTS[placement]
+    earned = {rule: 0.20 for rule in REIMBURSEMENT_POLICIES} | {"backloaded": 0.21} | revenues
+    return [
+        run_row(rule, q, placement, cost, earned[rule], seed, Verdict.UNSOLVED if rule in unsolved else Verdict.DERIVED)
+        for rule in REIMBURSEMENT_POLICIES
+    ]
+
+
+def raises(claim, *args):
+    """Whether ``claim`` refuses its arguments."""
+    try:
+        claim(*args)
+    except AssertionError:
+        return True
+    return False
 
 
 # --- the ranking at learned play --------------------------------------------
 
 
-def test_the_ranking_pairs_the_three_rules_at_one_cell_and_seed():
-    """A ranking is a comparison, so the three rules it compares have to be the same cell and the same seed."""
-    rows = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21}) + at_cell(
-        {"zero": 0.20, "full": 0.18, "targeted": 0.19}, seed=1
-    )
-    ranking = T.ranked(rows)
-    assert len(ranking) == 2, ranking
+def test_the_ranking_pairs_every_policy_at_one_cell_and_seed():
+    """A ranking is a comparison, so the policies it compares have to be the same cell and the same seed."""
+    ranking = T.ranked(at_cell() + at_cell(seed=1, backloaded=0.19))
     first, second = sorted(ranking, key=lambda row: row["seed"])
     assert (first["seed"], second["seed"]) == (0, 1)
-    assert first["targeted_wins"] and not second["targeted_wins"], ranking
+    assert first["backloaded_wins"] and not second["backloaded_wins"], ranking
+
+
+def test_back_loading_has_to_beat_every_corner_and_not_only_the_named_policies():
+    """The theorem claims the whole price-only class, so one unnamed corner earning more is a loss."""
+    (ranking,) = T.ranked(at_cell(war_0c0=0.22))
+    assert not ranking["backloaded_wins"], ranking
 
 
 def test_the_ranking_reads_learned_revenue_and_not_the_closed_form():
     """The point of experiment 2 is the ranking at learned play, which can disagree with the derived one."""
-    rows = at_cell({"zero": 0.21, "full": 0.18, "targeted": 0.20})  # inside the region, where theory says targeted
-    (ranking,) = T.ranked(rows)
-    assert ranking["margin_closed_form"] > 0, ranking
-    assert not ranking["targeted_wins"], ranking
-    assert abs(float(ranking["margin"]) + 0.01) < 1e-12, ranking
+    (ranking,) = T.ranked(at_cell(backloaded=0.19))
+    assert ranking["margin_closed_form"] > 0 > ranking["margin"], ranking
+    assert abs(ranking["margin"] + 0.01) < 1e-12, ranking
 
 
-
-def test_the_ranking_refuses_rules_that_were_given_different_budgets():
-    """A ranking is a comparison, so three runs at three budgets are not one, whatever they earned."""
-    rows = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21})
+def test_the_ranking_refuses_policies_that_were_given_different_budgets():
+    """Runs at different iteration limits are not one comparison, whatever they earned."""
+    rows = at_cell()
     rows[0]["iterations"] = 20_000
-    try:
-        T.ranked(rows)
-    except AssertionError:
-        return
-    raise AssertionError("three rules at two budgets were ranked against each other")
+    assert raises(T.ranked, rows)
 
 
-def test_the_ranking_carries_the_verdict_each_revenue_was_read_off():
-    """A ranking read off a rule that landed on another equilibrium is a different claim, and has to say so."""
-    rows = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21}, verdict=Verdict.UNSOLVED)
-    (ranking,) = T.ranked(rows)
-    assert not ranking["certified"], ranking
+def test_a_seed_where_any_policy_missed_an_equilibrium_is_recorded_but_not_counted():
+    """Revenue off a profile that is no equilibrium predicts nothing, so that seed cannot count as a win."""
+    ranking = T.ranked(at_cell() + at_cell(seed=1, unsolved=("war_cc0",)))
+    assert len(ranking) == 2, ranking
+    counted = {row["seed"]: row["counted"] for row in ranking}
+    assert counted == {0: True, 1: False}, ranking
+    assert not [row for row in ranking if row["seed"] == 1][0]["backloaded_wins"], ranking
 
 
-def test_the_ranking_says_whether_the_targeted_target_is_still_an_equilibrium():
-    """Past the incentive bound the profile the targeted revenue is stated at is not one anybody would play."""
-    kept = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21})
-    lost = at_cell({"zero": 0.20, "full": 0.18, "targeted": 0.21}, closed_form_loss=10 * T.CERTIFIED)
-    assert T.ranked(kept)[0]["separation_survives"], kept
-    assert not T.ranked(lost)[0]["separation_survives"], lost
+# --- the claim --------------------------------------------------------------
 
+
+def test_the_claim_holds_when_back_loading_wins_every_inside_seed():
+    """Every inside seed counted and won, at every signal probability, is the theorem surviving learning."""
+    rows = [row for q in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS) for row in at_cell(q=q, seed=seed)]
+    assert not raises(T.assert_claim, T.ranked(rows))
+
+
+def test_the_claim_fails_on_one_uncounted_or_lost_inside_seed_at_any_signal_probability():
+    """No inside seed may drop out, and no signal probability is excused."""
+    for q in T.SIGNAL_PROBABILITIES:
+        for spoiled in ({"unsolved": ("zero",)}, {"backloaded": 0.19}):
+            rows = [row for other in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS)
+                    for row in at_cell(q=other, seed=seed, **(spoiled if (other, seed) == (q, 3) else {}))]
+            assert raises(T.assert_claim, T.ranked(rows)), (q, spoiled)
+
+
+def test_the_claim_says_nothing_past_the_bound():
+    """The theorem is silent past the incentive bound, so a loss there is reported and not asserted."""
+    inside = [row for q in T.SIGNAL_PROBABILITIES for seed in range(T.SEEDS) for row in at_cell(q=q, seed=seed)]
+    past = [row for seed in range(T.SEEDS) for row in at_cell(placement="outside", seed=seed, backloaded=0.10)]
+    assert not raises(T.assert_claim, T.ranked(inside + past))
 
 
 if __name__ == "__main__":

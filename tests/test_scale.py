@@ -23,7 +23,7 @@ def settings(counts):
         G.Auction(n=n, q=q, c=0.05, reimbursement_policy=name)
         for n in counts
         for q in (0.3, 0.5)
-        for name in G.REIMBURSEMENT_POLICIES
+        for name in G.VALIDATED_POLICIES
     ]
 
 
@@ -96,7 +96,7 @@ def test_an_asymmetric_profile_still_routes_to_the_per_history_path():
 def test_the_experiment_runs_the_three_bidder_counts_the_paper_names():
     """Three, four and six, with correlated signals and a clock finer than the example's."""
     for n in scale.COUNTS:
-        auction = scale.auction_at(n, "targeted")
+        auction = scale.auction_at(n, "least_cost")
         # A finer clock over the same range of common values, and a cost stretched with them.
         assert abs(auction.rounds * auction.delta - n) < TIGHT, n
         assert abs(auction.c - scale.C * n / 2) < TIGHT, n
@@ -106,13 +106,13 @@ def test_the_experiment_runs_the_three_bidder_counts_the_paper_names():
 def test_the_reduction_covers_the_restricted_arm_at_every_count():
     """Every symmetric profile is read on orbits, so the restricted arm is exact even at six bidders."""
     for n in scale.COUNTS:
-        auction = scale.auction_at(n, "targeted")
+        auction = scale.auction_at(n, "least_cost")
         assert S.applies(auction, random_symmetric(auction, 7)), n
 
 
 def test_the_unrestricted_arm_runs_only_where_its_tree_can_be_walked():
     """Six bidders are past the enumeration bar, so the unrestricted arm stops at four."""
-    walked = {n: len(scale.auction_at(n, "targeted").info_sets) <= scale.EXACT_INFO_SETS for n in scale.COUNTS}
+    walked = {n: len(scale.auction_at(n, "least_cost").info_sets) <= scale.EXACT_INFO_SETS for n in scale.COUNTS}
     assert walked == {3: True, 4: True, 6: False}, walked
 
 

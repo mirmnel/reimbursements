@@ -96,17 +96,35 @@ def flat(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
     return schedule([fraction * c] * rounds)
 
 
-def targeted(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
+def least_cost(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
     """Reimburse in every round but the opening one, where separation has to be paid for."""
     return schedule([0.0] + [fraction * c] * (rounds - 1))
+
+
+def backloaded(c: float, rounds: int) -> ReimbursementPolicy:
+    """Reimburse the last decision round alone."""
+    return schedule([0.0] * (rounds - 1) + [c])
+
+
+def war(pattern: str) -> Callable[[float, int], ReimbursementPolicy]:
+    """Nothing at the opening, then the full cost at each two-bidder war price marked ``c`` in ``pattern``."""
+    def policy(c: float, rounds: int) -> ReimbursementPolicy:
+        assert len(pattern) == rounds - 1, (pattern, rounds)
+        return schedule([0.0] + [c * (mark == "c") for mark in pattern])
+
+    return policy
 
 
 PUBLISHED_REIMBURSEMENTS = {
     "zero": lambda c, rounds: flat(c, rounds, 0.0),
     "full": flat,
-    "targeted": targeted,
+    "least_cost": least_cost,
+    "backloaded": backloaded,
+    # The other corners of the price-only class, which the back-loaded policy has to beat.
+    **{f"war_{pattern}": war(pattern) for pattern in ("c00", "0c0", "cc0", "c0c", "0cc")},
 }
 REIMBURSEMENT_POLICIES = tuple(PUBLISHED_REIMBURSEMENTS)
+VALIDATED_POLICIES = ("zero", "full", "least_cost", "backloaded")  # those the paper prints closed forms for
 
 
 def states(n: int, rounds: int) -> List[State]:
@@ -131,7 +149,7 @@ class Auction:
 
     q: float = 0.5  # Pr(s_i = 1)
     c: float = 0.05  # participation cost per stay
-    reimbursement_policy: Union[str, ReimbursementPolicy] = "targeted"  # a schedule, or a published name
+    reimbursement_policy: Union[str, ReimbursementPolicy] = "least_cost"  # a schedule, or a published name
     n: int = 2
     rounds: int = 4  # decision rounds
     delta: float = 0.5  # tick size
@@ -355,25 +373,12 @@ def branches(auction: Auction) -> Tuple[Dict[State, np.ndarray], Dict[State, Lis
     return branch_payoffs, continuations
 
 
-sigma1 = lambda c: 1 - 4 * c / 3
-sigma3 = lambda c: 1 - 4 * c
-R0 = lambda c: 0.5 * (1 - sigma1(c) ** 2) + sigma1(c) ** 2 * (1.5 + 0.5 * sigma3(c) ** 2)
-L0 = lambda q: 8 * q**2 + 2 * q * (1 - q)  # expected staying bidder-rounds, frictionless
-PI = {
-    "zero": lambda c, q: q**2 * R0(c),
-    "full": lambda c, q: 2 * q**2 - c * L0(q),
-    "targeted": lambda c, q: 2 * q**2 * (1 - 3 * c),
-}
-ic_bound = lambda q: (1 - q) / 2  # r^T preserves separation iff c <= (1-q)/2
-
-# The root of 64c^3 - 128c^2 + 96c - 9 below one quarter, published as 0.108629.
-# Frozen because root finding drifts by an ulp between builds and this number reaches the results.
-CBAR = 0.10862915340160972
+ic_bound = lambda q: (1 - q) / 2  # paying nothing at the opening keeps separation iff c <= (1-q)/2
 
 
 def region(q: float) -> float:
-    """The cost bound below which the targeted policy beats both comparison policies."""
-    return min(CBAR, ic_bound(q))
+    """The cost bound below which the back-loaded policy is the revenue-maximising price-only rule."""
+    return min(0.25, ic_bound(q))  # past 1/4 the unreimbursed war has no interior mix
 
 
 def profile(auction: Auction, *strategies: Strategy) -> np.ndarray:
@@ -383,15 +388,26 @@ def profile(auction: Auction, *strategies: Strategy) -> np.ndarray:
     return np.array([float(strategies[bidder](state, signal)) for (bidder, state, signal) in auction.info_sets])
 
 
-SEPARATING: Strategy = lambda state, signal: float(signal == 1)  # L exits at p = 0, H stays
+def closed_form(auction: Auction) -> Tuple[Strategy, float]:
+    """The two-bidder symmetric sorting equilibrium under the auction's policy, and its seller net revenue."""
+    # The back-loading theorem's backward recursion over the high-high war, in units of a.
+    assert (auction.n, auction.rounds, auction.delta) == (2, 4, 0.5) and auction.independent_signals, auction
+    paid = auction.paid_by_state  # one history per round at two bidders
+    value, revenue, stays = 0.0, 2.0, [1.0, 0.0, 0.0, 0.0]  # W_4 and R_4: both reach 2a and split it
+    for t in (3, 2, 1):
+        price, net = auction.price(t), auction.c - paid[t]
+        conceded = (2.0 - price) / 2  # what staying earns when the rival exits, less what exiting does
+        if net <= value:
+            stay, value = 1.0, value - net
+        else:
+            stay = (conceded - net) / (conceded - value)
+            value = (1 - stay) * conceded
+        revenue = (1 - stay**2) * price - 2 * stay * paid[t] + stay**2 * revenue
+        stays[t] = stay
+    strategy: Strategy = lambda state, signal: stays[state.round] if signal == 1 else 0.0
+    return strategy, auction.q**2 * revenue - 2 * auction.q * paid[0]
 
 
-def war_of_attrition(c: float) -> Strategy:
-    """The low type exits everywhere, and the high type stays at the opening and then mixes."""
-    schedule = (1.0, sigma1(c), 1.0, sigma3(c))
-    return lambda state, signal: schedule[state[0]] if signal == 1 else 0.0
-
-
-def closed_form_strategy(rule: str, c: float) -> Strategy:
-    """The strategy the two-bidder example derives under one published reimbursement rule."""
-    return war_of_attrition(c) if rule == "zero" else SEPARATING
+def closed_form_revenue(rule: str, c: float, q: float) -> float:
+    """Closed-form seller net revenue under one published policy at one cell."""
+    return closed_form(Auction(q=q, c=c, reimbursement_policy=rule))[1]

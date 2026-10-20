@@ -1,4 +1,4 @@
-"""Experiments 1 and 2: whether MCCFR recovers the two-bidder closed forms, and whether the ranking survives."""
+"""Experiments 1 and 2: whether MCCFR recovers the two-bidder closed forms, and whether back-loading still wins."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Sequence, Tuple
 
-from auction.game import PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, region
+from auction.game import REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, ic_bound, region
 from auction.mccfr import BUDGET, REVENUE_BAR, Verdict, closed_forms, score, solve, stay_schedule
 from auction.exact import CERTIFIED, utility_loss
 
@@ -16,15 +16,14 @@ RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 SEEDS = 10
 
-# Costs are placed as multiples of region(q), since which of its two bounds binds moves with q.
+# Costs are placed as multiples of region(q). Every q is above one half, so the incentive bound binds.
 PLACEMENTS = {"inside": 0.5, "under": 0.9, "bound": 1.0, "over": 1.1, "outside": 1.5}
 
-# Experiment 1 samples the (c, q) plane rather than crossing it. At 0.5 the cost root binds, at 0.9
-# the incentive bound does, and 0.75 sits between.
-VALIDATION = {0.5: ("inside", "bound", "outside"), 0.75: ("bound", "outside"), 0.9: ("bound", "outside")}
+# Experiment 1 samples the (c, q) plane rather than crossing it.
+VALIDATION = {0.7: ("inside", "bound", "outside"), 0.75: ("bound", "outside"), 0.9: ("bound", "outside")}
 
-# Experiment 2 refines both bounds, one signal probability per bound.
-SIGNAL_PROBABILITIES = (0.5, 0.9)
+# Experiment 2 runs every placement at two signal probabilities.
+SIGNAL_PROBABILITIES = (0.7, 0.9)
 ROBUSTNESS = {q: tuple(PLACEMENTS) for q in SIGNAL_PROBABILITIES}
 
 TRACE = 1_000  # iterations between the snapshots a run is scored at along the way
@@ -54,7 +53,7 @@ def run(auction: Auction, placement: str, seed: int) -> Row:
     """One symmetry-restricted run, scored against the closed forms."""
     solved = solve(auction, seed=seed, iterations=BUDGET, trace_every=TRACE, symmetry_restricted=True)
     scored = score(auction, solved.profile)
-    derived, _ = closed_forms(auction)
+    derived, closed_form_revenue = closed_forms(auction)
     return {
         "reimbursement_policy": auction.reimbursement_policy,
         "placement": placement,
@@ -67,7 +66,7 @@ def run(auction: Auction, placement: str, seed: int) -> Row:
         # Past the incentive bound the target is no equilibrium, which puts derived out of reach.
         "closed_form_loss": float(utility_loss(auction, derived)),
         "Pi": scored.revenue,
-        "Pi_closed_form": PI[auction.reimbursement_policy](auction.c, auction.q),
+        "Pi_closed_form": closed_form_revenue,
         "trace": [
             {"reimbursement_policy": auction.reimbursement_policy, "placement": placement, "q": auction.q,
              "seed": seed, "iteration": TRACE * (k + 1), "utility_loss": float(utility_loss(auction, profile))}
@@ -83,16 +82,16 @@ def run_job(job: Tuple[str, float, str, float, int]) -> Row:
     return run(Auction(q=q, c=c, reimbursement_policy=rule), placement, seed)
 
 
-def sweep(cells: Sequence[Cell]) -> List[Row]:
-    """Every published rule at every cell at every seed, with verdict counts printed per cell."""
-    jobs = [(rule, q, placement, c, seed) for rule in REIMBURSEMENT_POLICIES for (q, placement, c) in cells for seed in range(SEEDS)]
+def sweep(cells: Sequence[Cell], policies: Sequence[str]) -> List[Row]:
+    """Every policy at every cell at every seed, with verdict counts printed per cell."""
+    jobs = [(rule, q, placement, c, seed) for rule in policies for (q, placement, c) in cells for seed in range(SEEDS)]
     with ProcessPoolExecutor() as pool:
         rows = list(pool.map(run_job, jobs))
-    for rule in REIMBURSEMENT_POLICIES:
+    for rule in policies:
         for q, placement, c in cells:
             at = [r for r in rows if (r["reimbursement_policy"], r["q"], r["placement"]) == (rule, q, placement)]
             counts = " ".join(f"{v.value} {sum(r['verdict'] == v.value for r in at)}" for v in Verdict)
-            print(f"  {rule:9s} q={q:.2f} {placement:8s} c={c:.4f}  {counts}")
+            print(f"  {rule:10s} q={q:.2f} {placement:8s} c={c:.4f}  {counts}")
     return rows
 
 
@@ -101,12 +100,16 @@ def check(rows: Sequence[Row]) -> None:
     derived = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
     assert all(abs(float(r["Pi"]) - float(r["Pi_closed_form"])) <= REVENUE_BAR for r in derived), derived
     beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
-    assert {r["reimbursement_policy"] for r in beyond} <= {"targeted"}, beyond
     assert all(float(r["c"]) > ic_bound(float(r["q"])) for r in beyond), beyond
 
 
+def margin(earned: Dict[str, float]) -> float:
+    """What back-loading earns above the best other policy."""
+    return earned["backloaded"] - max(value for rule, value in earned.items() if rule != "backloaded")
+
+
 def ranked(rows: Sequence[Row]) -> List[Row]:
-    """The revenue ranking at learned play, one row per cell and seed, with the closed-form one beside it."""
+    """Back-loading against every other policy at learned play, one row per cell and seed, counted or not."""
     paired: Dict[tuple, Dict[str, Row]] = {}
     for row in rows:
         paired.setdefault((row["q"], row["placement"], row["seed"]), {})[str(row["reimbursement_policy"])] = row
@@ -114,60 +117,61 @@ def ranked(rows: Sequence[Row]) -> List[Row]:
     for (q, placement, seed), runs in paired.items():
         budgets = {int(runs[rule]["iterations"]) for rule in REIMBURSEMENT_POLICIES}
         assert len(budgets) == 1, (q, placement, seed, budgets)
-        q, c = float(q), float(runs["targeted"]["c"])
-        learned = {rule: float(runs[rule]["Pi"]) for rule in REIMBURSEMENT_POLICIES}
-        derived = {rule: float(PI[rule](c, q)) for rule in REIMBURSEMENT_POLICIES}
-        margin = lambda earned: earned["targeted"] - max(earned["zero"], earned["full"])
+        earned = lambda column: {rule: float(runs[rule][column]) for rule in REIMBURSEMENT_POLICIES}
+        counted = all(runs[rule]["verdict"] != Verdict.UNSOLVED.value for rule in REIMBURSEMENT_POLICIES)
         ranking.append({
-            "q": q,
+            "q": float(q),
             "placement": placement,
-            "c": c,
+            "c": float(runs["backloaded"]["c"]),
             "seed": int(seed),
             "iterations": budgets.pop(),
-            "margin": margin(learned),
-            "targeted_wins": margin(learned) > 0.0,
-            "margin_closed_form": margin(derived),
-            "certified": all(runs[rule]["verdict"] != Verdict.UNSOLVED.value for rule in REIMBURSEMENT_POLICIES),
-            "separation_survives": float(runs["targeted"]["closed_form_loss"]) <= CERTIFIED,
+            "counted": counted,
+            "margin": margin(earned("Pi")),
+            "backloaded_wins": counted and margin(earned("Pi")) > 0.0,
+            "margin_closed_form": margin(earned("Pi_closed_form")),
         })
     return ranking
 
 
 def report(ranking: Sequence[Row]) -> None:
-    """Print how often the targeted rule won at each cell, as counts rather than an average over seeds."""
+    """Print, per cell, how many seeds counted and how many of those back-loading won."""
     for q, placement in dict.fromkeys((r["q"], r["placement"]) for r in ranking):
         at = [r for r in ranking if (r["q"], r["placement"]) == (q, placement)]
-        margins = [float(r["margin"]) for r in at]
-        print(f"  q={q:.2f} {placement:8s} targeted wins {sum(bool(r['targeted_wins']) for r in at)}/{len(at)}"
-              f"  learned margin {min(margins):+.4f} to {max(margins):+.4f}"
-              f"  closed form {float(at[0]['margin_closed_form']):+.4f}")
+        margins = [float(r["margin"]) for r in at if r["counted"]]
+        spread = f"{min(margins):+.4f} to {max(margins):+.4f}" if margins else "none counted"
+        print(f"  q={q:.2f} {placement:8s} counted {len(margins)}/{len(at)}"
+              f"  back-loaded wins {sum(bool(r['backloaded_wins']) for r in at)}"
+              f"  learned margin {spread}  closed form {float(at[0]['margin_closed_form']):+.4f}")
+
+
+def assert_claim(ranking: Sequence[Row]) -> None:
+    """At every inside cell, every seed counts and back-loading wins at each."""
+    for q in SIGNAL_PROBABILITIES:
+        inside = [r for r in ranking if (r["q"], r["placement"]) == (q, "inside")]
+        assert sum(bool(r["counted"]) for r in inside) == SEEDS, (q, inside)
+        assert all(r["backloaded_wins"] for r in inside), (q, inside)
 
 
 def validation() -> List[Row]:
-    """Experiment 1: ten seeds at each sampled cell under each published rule."""
-    rows = sweep(grid(VALIDATION))
+    """Experiment 1: ten seeds at each sampled cell under each policy the paper prints closed forms for."""
+    rows = sweep(grid(VALIDATION), VALIDATED_POLICIES)
     write("validation_trace.csv", [point for row in rows for point in row["trace"]])
     write("validation.csv", rows)  # before the claims are checked, so a failed claim keeps its runs
     check(rows)
-    inside = [r for r in rows if (r["reimbursement_policy"], r["q"], r["placement"]) == ("zero", 0.5, "inside")]
+    inside = [r for r in rows if (r["reimbursement_policy"], r["placement"]) == ("zero", "inside")]
     assert all(float(r["utility_loss"]) <= CERTIFIED for r in inside), inside
     return rows
 
 
 def robustness() -> List[Row]:
-    """Experiment 2: the refined grid, and the ranking at learned play."""
-    rows = sweep(grid(ROBUSTNESS))
+    """Experiment 2: every price-only corner and full reimbursement across the grid, ranked at learned play."""
+    rows = sweep(grid(ROBUSTNESS), REIMBURSEMENT_POLICIES)
     write("robustness.csv", rows)
     check(rows)
     ranking = ranked(rows)
     report(ranking)
     write("learned_ranking.csv", ranking)
-    past = [r for r in ranking if float(r["c"]) > ic_bound(float(r["q"]))]
-    assert not any(r["separation_survives"] for r in past), past
-    # Well inside the region the ranking survives being learned, and outside it the targeted rule loses.
-    inside = [r for r in ranking if r["placement"] == "inside" and r["q"] == 0.5]
-    assert len(inside) == SEEDS and all(r["targeted_wins"] for r in inside), inside
-    assert not any(r["targeted_wins"] for r in ranking if r["placement"] == "outside")
+    assert_claim(ranking)
     return ranking
 
 

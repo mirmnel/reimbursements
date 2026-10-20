@@ -151,13 +151,9 @@ def test_the_reported_schedule_names_the_probabilities_the_closed_forms_are_stat
     """The pipelines report a run this way, so the names have to sit on the rounds the paper gives them."""
     auction, _ = target("zero")
     derived, _ = M.closed_forms(auction)
-    assert M.stay_schedule(auction, derived) == {
-        "open_high": 1.0,
-        "open_low": 0.0,
-        "sigma1": game.sigma1(C),
-        "sigma2": 1.0,
-        "sigma3": game.sigma3(C),
-    }
+    expected = {"open_high": 1.0, "open_low": 0.0, "sigma1": 1 - 4 * C / 3, "sigma2": 1.0, "sigma3": 1 - 4 * C}
+    got = M.stay_schedule(auction, derived)
+    assert got.keys() == expected.keys() and all(abs(got[k] - expected[k]) < TIGHT for k in expected), got
 
 
 def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
@@ -173,14 +169,15 @@ def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
 # --- the grid ---------------------------------------------------------------
 
 
-def test_the_targeted_closed_form_stops_being_an_equilibrium_past_the_incentive_bound():
-    """Where separation is not preserved the derived verdict is out of reach, and different is the answer."""
+def test_every_closed_form_is_an_equilibrium_inside_the_region():
+    """Below the bound the theorem gives every price-only corner a sorting equilibrium, so matching it is reachable."""
     for q, _, c in T.grid(T.VALIDATION) + T.grid(T.ROBUSTNESS):
+        if c > game.region(q):
+            continue
         for rule in game.REIMBURSEMENT_POLICIES:
             auction = game.Auction(q=q, c=c, reimbursement_policy=rule)
-            sigma = game.profile(auction, game.closed_form_strategy(rule, c))
-            loss = float(A.utility_loss(auction, sigma))
-            assert (loss > A.CERTIFIED) == (rule == "targeted" and c > game.ic_bound(q)), (q, c, rule, loss)
+            sigma = game.profile(auction, game.closed_form(auction)[0])
+            assert float(A.utility_loss(auction, sigma)) <= A.CERTIFIED, (q, c, rule)
 
 
 if __name__ == "__main__":

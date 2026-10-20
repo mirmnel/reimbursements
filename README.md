@@ -15,8 +15,8 @@ python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 
 
 | experiment | script | writes |
 |---|---|---|
-| 1. Validation: MCCFR recovers separation, the stay probabilities under `r=0`, and `Pi_0`, `Pi_full`, `Pi_T` | `experiments/two_bidder.py validation` | `validation.csv` |
-| 2. Robustness: the ranking `Pi_T > max(Pi_0, Pi_full)` at learned play, refined near both bounds | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv` |
+| 1. Validation: MCCFR recovers the sorting equilibrium and revenue under no, full, least-cost and back-loaded reimbursement | `experiments/two_bidder.py validation` | `validation.csv` |
+| 2. Robustness: back-loading out-earns every other price-only corner and full reimbursement at learned play | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv` |
 | 3. Scale: at `n` in 3, 4, 6, solve `Gamma^0`, write the minimum-cost rule `r*`, and test whether learning recovers the reference | `experiments/scale.py` | `scale_rules.csv`, `scale.csv` |
 
 Every run gets one of three verdicts. `derived` means it reached an equilibrium that sits at the target, and the

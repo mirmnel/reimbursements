@@ -151,9 +151,8 @@ class Score:
 
 def closed_forms(auction: Auction) -> Tuple[np.ndarray, float]:
     """The two-bidder example's closed-form profile and seller net revenue under this auction's rule."""
-    rule = auction.reimbursement_policy
-    derived = game.profile(auction, game.closed_form_strategy(rule, auction.c))
-    return derived, game.PI[rule](auction.c, auction.q)
+    strategy, revenue = game.closed_form(auction)
+    return game.profile(auction, strategy), revenue
 
 
 def stay_schedule(auction: Auction, sigma: np.ndarray) -> Dict[str, float]:

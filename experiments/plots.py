@@ -15,16 +15,20 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 
-from auction.game import CBAR, PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, payoff_scale
+from auction.game import (
+    REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, closed_form_revenue, payoff_scale, region,
+)
 from auction.mccfr import REVENUE_BAR, STAY_BAR, Verdict, closed_forms, stay_schedule
-from auction.exact import CERTIFIED
+from auction.exact import CERTIFIED, utility_loss
 from experiments.scale import COUNTS, ROUNDS
-from experiments.two_bidder import RESULTS, SIGNAL_PROBABILITIES, VALIDATION, grid
+from experiments.two_bidder import RESULTS, SIGNAL_PROBABILITIES, VALIDATION, grid, margin
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
-RULE_COLOR = {"zero": "#2a78d6", "full": "#eb6834", "targeted": "#1baf7a"}
-RULE_LABEL = {"zero": "$r=0$", "full": "$r=c$", "targeted": "$r^T$"}
-Q_COLOR = {0.5: "#6da7ec", 0.75: "#2a78d6", 0.9: "#104281"}
+CORNER_COLOR = "#9a9993"  # the unnamed corners share one recessive grey
+RULE_COLOR = {"zero": "#2a78d6", "full": "#eb6834", "least_cost": "#1baf7a", "backloaded": "#c2185b"}
+RULE_COLOR |= {rule: CORNER_COLOR for rule in REIMBURSEMENT_POLICIES if rule not in RULE_COLOR}
+RULE_LABEL = {"zero": "$r=0$", "full": "$r=c$", "least_cost": "$r^*$", "backloaded": "back-loaded"}
+Q_COLOR = {0.7: "#6da7ec", 0.75: "#2a78d6", 0.9: "#104281"}
 SCHEDULE_MARKER = {"open_high": "^", "open_low": "v", "sigma1": "o", "sigma2": "s", "sigma3": "D"}
 SCHEDULE_LABEL = {
     "open_high": "open, high",
@@ -33,6 +37,17 @@ SCHEDULE_LABEL = {
     "sigma2": r"$\sigma_2$",
     "sigma3": r"$\sigma_3$",
 }
+
+
+def equilibrium(rule: str, c: float, q: float) -> bool:
+    """Whether the closed form under one policy at one cell is an equilibrium."""
+    auction = Auction(q=q, c=c, reimbursement_policy=rule)
+    return utility_loss(auction, closed_forms(auction)[0]) <= CERTIFIED
+
+
+def span_of(q: float) -> float:
+    """Each q's x range, wide enough to hold its outside placement."""
+    return 1.6 * region(q)
 
 
 def theory_schedule(q: float, c: float) -> Dict[str, float]:
@@ -69,7 +84,7 @@ def chrome(axis: plt.Axes, title: str, xlabel: str, ylabel: str) -> None:
 
 def revenue_panel(axis: plt.Axes, runs: List[Dict[str, object]]) -> None:
     """Learned seller net revenue against the closed form, verdict carried by the marker fill."""
-    for rule in REIMBURSEMENT_POLICIES:
+    for rule in VALIDATED_POLICIES:
         color = RULE_COLOR[rule]
         for row in (row for row in runs if row["reimbursement_policy"] == rule):
             verdict = Verdict(row["verdict"])
@@ -83,7 +98,7 @@ def revenue_panel(axis: plt.Axes, runs: List[Dict[str, object]]) -> None:
     axis.set_xlim(0.0, 1.5)
     style(axis, "A. Seller net revenue", r"$\Pi_{\mathrm{theory}}$", r"$\Pi_{\mathrm{MCCFR}}$", REVENUE_BAR)
     handles = [Line2D([], [], marker="o", linestyle="", color=RULE_COLOR[rule], label=RULE_LABEL[rule])
-               for rule in REIMBURSEMENT_POLICIES]
+               for rule in VALIDATED_POLICIES]
     handles += [
         Line2D([], [], marker="o", linestyle="", color=MUTED, label="derived"),
         Line2D([], [], marker="o", linestyle="", markerfacecolor="white", markeredgecolor=MUTED, label="different"),
@@ -115,33 +130,27 @@ def by_cost_panels(runs: List[Dict[str, object]]) -> None:
     probabilities = sorted({row["q"] for row in runs})
     fig, axes = plt.subplots(1, len(probabilities), figsize=(7.0, 2.8), sharey=False, constrained_layout=True)
     for axis, q in zip(axes, probabilities):
-        span = np.linspace(0.0, 0.19, 200)
-        bound = ic_bound(q)
-        for rule in REIMBURSEMENT_POLICIES:
+        span = np.linspace(0.0, span_of(q), 200)
+        bound = region(q)
+        for rule in VALIDATED_POLICIES:
             color = RULE_COLOR[rule]
-            curve = np.array([PI[rule](c, q) for c in span])
-            if rule == "targeted":
-                # Past the incentive bound the targeted profile is no equilibrium, so its curve is notional.
-                axis.plot(span[span <= bound], curve[span <= bound], color=color, linewidth=2)
-                axis.plot(span[span >= bound], curve[span >= bound], color=color, linewidth=1.2, linestyle=(0, (2, 2)))
-            else:
-                axis.plot(span, curve, color=color, linewidth=2)
+            curve = np.array([closed_form_revenue(rule, c, q) for c in span])
+            held = np.array([equilibrium(rule, c, q) for c in span])
+            axis.plot(span, np.where(held, curve, np.nan), color=color, linewidth=2)
+            axis.plot(span, np.where(held, np.nan, curve), color=color, linewidth=1.2, linestyle=(0, (2, 2)))
             at = [row for row in runs if row["reimbursement_policy"] == rule and row["q"] == q]
             axis.scatter([row["c"] for row in at], [row["Pi"] for row in at], s=16, color=color,
                          edgecolors="white", linewidths=0.6, zorder=3)
-        axis.axvline(CBAR, color=MUTED, linewidth=0.8)
-        axis.text(CBAR, 1.0, r" $\bar c$", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
-        if bound < span[-1]:
-            axis.axvline(bound, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
-            axis.text(bound, 0.88, " IC", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
+        axis.axvline(bound, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
+        axis.text(bound, 0.88, " IC", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
         axis.set_xlim(0.0, span[-1])
         chrome(axis, f"$q={q:g}$", "cost $c$", r"seller net revenue $\Pi$" if axis is axes[0] else "")
-    handles = [Line2D([], [], color=RULE_COLOR[rule], linewidth=2, label=RULE_LABEL[rule]) for rule in REIMBURSEMENT_POLICIES]
+    handles = [Line2D([], [], color=RULE_COLOR[rule], linewidth=2, label=RULE_LABEL[rule]) for rule in VALIDATED_POLICIES]
     handles += [
         Line2D([], [], color=MUTED, linewidth=0, marker="o", label="MCCFR seed"),
-        Line2D([], [], color=RULE_COLOR["targeted"], linewidth=1.2, linestyle=(0, (2, 2)), label="$r^T$ past IC bound"),
+        Line2D([], [], color=MUTED, linewidth=1.2, linestyle=(0, (2, 2)), label="no equilibrium"),
     ]
-    fig.legend(handles=handles, loc="outside lower center", ncol=5, fontsize=7.5, frameon=False, labelcolor=INK)
+    fig.legend(handles=handles, loc="outside lower center", ncol=6, fontsize=7.5, frameon=False, labelcolor=INK)
     save(fig, "validation_by_cost")
 
 
@@ -154,14 +163,13 @@ VERDICT_STYLE = {  # neutral steps, so verdicts never borrow a rule's hue
 
 def region_panels(runs: List[Dict[str, object]]) -> None:
     """Each rule's verdict counts placed on the (c, q) plane, against the bounds the theory draws there."""
-    fig, axes = plt.subplots(1, len(REIMBURSEMENT_POLICIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
+    fig, axes = plt.subplots(1, len(VALIDATED_POLICIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
     cells = sorted({(row["q"], row["c"]) for row in runs})
-    costs, probabilities = np.linspace(0.0, 0.2, 200), np.linspace(0.4, 1.0, 200)
-    width, height = 0.022, 0.035
-    for axis, rule in zip(axes, REIMBURSEMENT_POLICIES):
-        inside = np.minimum(CBAR, ic_bound(probabilities))
+    costs, probabilities = np.linspace(0.0, 0.25, 200), np.linspace(0.6, 1.0, 200)
+    width, height = 0.022, 0.025
+    for axis, rule in zip(axes, VALIDATED_POLICIES):
+        inside = np.array([region(q) for q in probabilities])
         axis.fill_betweenx(probabilities, 0.0, inside, color=GRID, alpha=0.7, linewidth=0, zorder=0)
-        axis.axvline(CBAR, color=MUTED, linewidth=0.8)
         axis.plot(costs, 1 - 2 * costs, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
         for q, c in cells:
             at = [row for row in runs if row["reimbursement_policy"] == rule and row["q"] == q and row["c"] == c]
@@ -178,16 +186,13 @@ def region_panels(runs: List[Dict[str, object]]) -> None:
             offset = height / 2 + 0.008
             axis.text(c, q + offset if above else q - offset, counts, ha="center", va="bottom" if above else "top",
                       fontsize=6.5, color=INK)
-        axis.set_xlim(0.0, 0.2)
-        axis.set_ylim(0.4, 1.0)
+        axis.set_xlim(0.0, 0.25)
+        axis.set_ylim(0.6, 1.0)
         chrome(axis, RULE_LABEL[rule], "cost $c$", "signal probability $q$" if axis is axes[0] else "")
-    axes[0].text(0.006, 0.43, "region", fontsize=7.5, color=MUTED)
+    axes[0].text(0.006, 0.62, "region", fontsize=7.5, color=MUTED)
     handles = [Patch(edgecolor=MUTED, linewidth=0.5, label=verdict.value, **VERDICT_STYLE[verdict]) for verdict in Verdict]
-    handles += [
-        Line2D([], [], color=MUTED, linewidth=0.8, label=r"$\bar c$"),
-        Line2D([], [], color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)), label="IC bound $(1-q)/2$"),
-    ]
-    fig.legend(handles=handles, loc="outside lower center", ncol=5, fontsize=7.5, frameon=False, labelcolor=INK)
+    handles.append(Line2D([], [], color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)), label="IC bound $(1-q)/2$"))
+    fig.legend(handles=handles, loc="outside lower center", ncol=4, fontsize=7.5, frameon=False, labelcolor=INK)
     save(fig, "validation_region")
 
 
@@ -229,10 +234,11 @@ def trace_panels() -> None:
     """Utility loss along every run, a row per rule, then the r=0 stay schedule along the same runs."""
     points = read("validation_trace.csv", ("q", "iteration", "utility_loss", "sigma1", "sigma2", "sigma3"))
     cells = grid(VALIDATION)
-    fig, axes = plt.subplots(4, len(cells), figsize=(7.0, 6.4), sharex=True, sharey="row", constrained_layout=True)
+    rows = len(VALIDATED_POLICIES) + 1
+    fig, axes = plt.subplots(rows, len(cells), figsize=(7.0, 7.6), sharex=True, sharey="row", constrained_layout=True)
     for column, (q, placement, c) in enumerate(cells):
         at = [p for p in points if (p["q"], p["placement"]) == (q, placement)]
-        for row, rule in enumerate(REIMBURSEMENT_POLICIES):
+        for row, rule in enumerate(VALIDATED_POLICIES):
             axis = axes[row, column]
             runs = [[p for p in at if p["reimbursement_policy"] == rule and p["seed"] == seed]
                     for seed in sorted({p["seed"] for p in at})]
@@ -245,7 +251,7 @@ def trace_panels() -> None:
             axis.set_xscale("log")
             axis.set_yscale("log")
             chrome(axis, f"$q={q:g}$\n{placement}" if row == 0 else "", "", f"{RULE_LABEL[rule]} utility loss" if column == 0 else "")
-        axis = axes[3, column]
+        axis = axes[rows - 1, column]
         zero = [p for p in at if p["reimbursement_policy"] == "zero"]
         target = theory_schedule(q, c)
         for name, color in zip(("sigma1", "sigma2", "sigma3"), PLACEMENT_COLOR.values()):
@@ -273,9 +279,6 @@ def save(fig: plt.Figure, name: str) -> None:
     print(f"  wrote {path}")
 
 
-SPAN = {0.5: 0.18, 0.9: 0.08}  # each q's x range, wide enough to hold its outside placement
-
-
 def read(name: str, numeric: tuple) -> List[Dict[str, object]]:
     """One results CSV, with the named columns parsed as floats."""
     with open(os.path.join(RESULTS, name)) as handle:
@@ -287,55 +290,49 @@ def read(name: str, numeric: tuple) -> List[Dict[str, object]]:
 
 
 def theory_margin(c: float, q: float) -> float:
-    """How far the targeted rule's closed-form revenue sits above the better of the other two."""
-    return PI["targeted"](c, q) - max(PI["zero"](c, q), PI["full"](c, q))
+    """How far back-loading's closed-form revenue sits above the best other policy's."""
+    return margin({rule: closed_form_revenue(rule, c, q) for rule in REIMBURSEMENT_POLICIES})
 
 
 def bounds(axis: plt.Axes, q: float) -> None:
-    """The cost root and, where it falls in range, the incentive bound with the cut-off region past it."""
-    if CBAR < SPAN[q]:
-        axis.axvline(CBAR, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-        axis.text(CBAR, 1.0, r" $\bar c$", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
-    bound = ic_bound(q)
-    if bound < SPAN[q]:
-        axis.axvspan(bound, SPAN[q], color=GRID, alpha=0.6, linewidth=0, zorder=0)
-        axis.axvline(bound, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
-        axis.text(bound, 1.0, " past IC: no $r^T$\n equilibrium", transform=axis.get_xaxis_transform(),
-                  fontsize=7, color=MUTED, va="top")
+    """The incentive bound, with the stretch past it where the theorem is silent greyed out."""
+    bound = region(q)
+    axis.axvspan(bound, span_of(q), color=GRID, alpha=0.6, linewidth=0, zorder=0)
+    axis.axvline(bound, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
+    axis.text(bound, 1.0, " past IC: theorem\n silent", transform=axis.get_xaxis_transform(),
+              fontsize=7, color=MUTED, va="top")
 
 
 def ranking_figure() -> None:
-    """Learned ranking margin per seed against the closed-form margin, cut where r^T stops being an equilibrium."""
+    """Back-loading's learned margin over the best other policy per seed, against the closed-form margin."""
     rows = read("learned_ranking.csv", ("q", "c", "margin"))
     jitter = np.random.default_rng(0)
-    color = RULE_COLOR["targeted"]
+    color = RULE_COLOR["backloaded"]
     fig, axes = plt.subplots(1, len(SIGNAL_PROBABILITIES), figsize=(7.0, 2.9), constrained_layout=True)
     for axis, q in zip(axes, SIGNAL_PROBABILITIES):
-        span = np.linspace(0.0, min(SPAN[q], ic_bound(q)), 200)
+        span = np.linspace(0.0, region(q), 200)
         axis.axhline(0.0, color=INK, linewidth=0.8)
         axis.plot(span, [theory_margin(c, q) for c in span], color=color, linewidth=2)
-        at = [row for row in rows if row["q"] == q]
-        for row in at:
-            certified = row["certified"] == "True"
-            axis.scatter(row["c"] + jitter.uniform(-0.006, 0.006) * SPAN[q], row["margin"], s=16,
-                         facecolors=color if certified else "white", edgecolors=color, linewidths=0.9, zorder=3)
+        for row in (row for row in rows if row["q"] == q):
+            counted = row["counted"] == "True"
+            axis.scatter(row["c"] + jitter.uniform(-0.006, 0.006) * span_of(q), row["margin"], s=16,
+                         facecolors=color if counted else "white", edgecolors=color, linewidths=0.9, zorder=3)
         bounds(axis, q)
-        axis.set_xlim(0.0, SPAN[q])
-        chrome(axis, f"$q={q:g}$", "cost $c$",
-               r"$\Pi_T - \max\{\Pi_0, \Pi_{\mathrm{full}}\}$" if axis is axes[0] else "")
+        axis.set_xlim(0.0, span_of(q))
+        chrome(axis, f"$q={q:g}$", "cost $c$", r"$\widehat\Pi - $ best other $\Pi$" if axis is axes[0] else "")
     handles = [
         Line2D([], [], color=color, linewidth=2, label="closed form"),
-        Line2D([], [], color=color, linewidth=0, marker="o", label="seed, all three rules certified"),
-        Line2D([], [], color=color, linewidth=0, marker="o", markerfacecolor="white", label="seed, a rule unsolved"),
+        Line2D([], [], color=color, linewidth=0, marker="o", label="counted seed"),
+        Line2D([], [], color=color, linewidth=0, marker="o", markerfacecolor="white", label="seed, a policy reached no equilibrium"),
     ]
     fig.legend(handles=handles, loc="outside lower center", ncol=3, fontsize=7.5, frameon=False, labelcolor=INK)
     save(fig, "robustness_ranking")
 
 
 def gap_figure() -> None:
-    """Learned minus closed-form revenue per rule and seed, the per-rule gaps the ranking margin is built from."""
+    """Learned minus closed-form revenue per policy and seed, the per-policy gaps the ranking margin is built from."""
     rows = read("robustness.csv", ("q", "c", "Pi", "Pi_closed_form"))
-    dodge = {rule: offset for rule, offset in zip(REIMBURSEMENT_POLICIES, (-0.012, 0.0, 0.012))}
+    dodge = dict(zip(REIMBURSEMENT_POLICIES, np.linspace(-0.02, 0.02, len(REIMBURSEMENT_POLICIES))))
     fig, axes = plt.subplots(1, len(SIGNAL_PROBABILITIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
     for axis, q in zip(axes, SIGNAL_PROBABILITIES):
         axis.axhspan(-REVENUE_BAR, REVENUE_BAR, color=GRID, alpha=0.6, linewidth=0, zorder=0)
@@ -343,26 +340,23 @@ def gap_figure() -> None:
         for rule in REIMBURSEMENT_POLICIES:
             at = [row for row in rows if row["q"] == q and row["reimbursement_policy"] == rule]
             costs = sorted({row["c"] for row in at})
-            shift = dodge[rule] * SPAN[q]
+            shift = dodge[rule] * span_of(q)
             gaps = {c: [row["Pi"] - row["Pi_closed_form"] for row in at if row["c"] == c] for c in costs}
             axis.plot([c + shift for c in costs], [np.median(gaps[c]) for c in costs], color=RULE_COLOR[rule],
                       linewidth=1.2)
             for c in costs:
                 axis.scatter([c + shift] * len(gaps[c]), gaps[c], s=12, color=RULE_COLOR[rule],
                              edgecolors="white", linewidths=0.5, zorder=3)
-        if CBAR < SPAN[q]:
-            axis.axvline(CBAR, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-            axis.text(CBAR, 1.0, r" $\bar c$", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
-        if ic_bound(q) < SPAN[q]:
-            axis.axvline(ic_bound(q), color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
-            axis.text(ic_bound(q), 1.0, " IC", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
-        axis.set_xlim(0.0, SPAN[q])
+        axis.axvline(region(q), color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
+        axis.text(region(q), 1.0, " IC", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
+        axis.set_xlim(0.0, span_of(q))
         chrome(axis, f"$q={q:g}$", "cost $c$",
                r"$\Pi_{\mathrm{MCCFR}} - \Pi_{\mathrm{theory}}$" if axis is axes[0] else "")
     handles = [Line2D([], [], color=RULE_COLOR[rule], linewidth=1.2, marker="o", label=RULE_LABEL[rule])
-               for rule in REIMBURSEMENT_POLICIES]
+               for rule in VALIDATED_POLICIES]
+    handles.append(Line2D([], [], color=CORNER_COLOR, linewidth=1.2, marker="o", label="other corners"))
     handles.append(Line2D([], [], color=GRID, linewidth=6, label=r"$\pm$ revenue tolerance"))
-    fig.legend(handles=handles, loc="outside lower center", ncol=4, fontsize=7.5, frameon=False, labelcolor=INK)
+    fig.legend(handles=handles, loc="outside lower center", ncol=6, fontsize=7.5, frameon=False, labelcolor=INK)
     save(fig, "robustness_gaps")
 
 
