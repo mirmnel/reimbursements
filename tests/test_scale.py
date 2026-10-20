@@ -116,14 +116,6 @@ def test_the_unrestricted_arm_runs_only_where_its_tree_can_be_walked():
     assert walked == {3: True, 4: True, 6: False}, walked
 
 
-def test_the_verdict_reads_the_distance_it_is_handed_and_the_loss_decides_first():
-    """Certification comes first, so a profile that is not an equilibrium is never read as a recovery."""
-    assert scale.verdict_on(3, 1e-6, 0.3, distance=0.0, target_revenue=0.3) is Verdict.DERIVED
-    assert scale.verdict_on(3, 1e-6, 0.3, distance=1.0, target_revenue=0.3) is Verdict.DIFFERENT
-    assert scale.verdict_on(3, 1e-6, 0.3, distance=0.0, target_revenue=0.9) is Verdict.DIFFERENT
-    assert scale.verdict_on(3, 1.0, 0.3, distance=0.0, target_revenue=0.3) is Verdict.UNSOLVED
-
-
 def test_one_bidder_off_the_target_counts_as_fully_as_all_of_them():
     """The distance is the worst bidder's, so the others matching cannot average one deviant away."""
     auction = scale.auction_at(3, "full")

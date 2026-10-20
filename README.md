@@ -22,7 +22,9 @@ python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 
 Every run gets one of three verdicts. `derived` means it reached an equilibrium that sits at the target, and the
 target is itself an equilibrium. `different` means it reached another equilibrium. `unsolved` means it did not reach
 an equilibrium. A run reaches an equilibrium when its exact best-response utility loss is under `exact.CERTIFIED`,
-the paper's epsilon of `1e-3`. That check never reads a regret table, so a solver bug cannot pass itself.
+the paper's epsilon of `1e-3`. That check never reads a regret table, so a solver bug cannot pass itself. Revenue
+stays out of the verdict, and each experiment asserts separately that every `derived` run's revenue sits within
+`REVENUE_BAR` of theory.
 
 ## The modules
 

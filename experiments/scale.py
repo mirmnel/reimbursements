@@ -35,15 +35,6 @@ def auction_at(n: int, policy, c: float = C) -> Auction:
     )
 
 
-def verdict_on(n: int, loss: float, revenue: float, distance: float, target_revenue: float) -> Verdict:
-    """The three-way reading of a run, against the reference profile rather than against a closed form."""
-    if loss > certified(n):
-        return Verdict.UNSOLVED
-    if distance <= STAY_BAR and abs(revenue - target_revenue) <= REVENUE_BAR * payoff_scale(n):
-        return Verdict.DERIVED
-    return Verdict.DIFFERENT
-
-
 @dataclass
 class Reference:
     """One bidder count's frictionless equilibrium, and the cheapest rule implementing it where bidding costs."""
@@ -117,7 +108,8 @@ def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str,
         "c": under.c,
         "seed": seed,
         "symmetry_restricted": restricted,
-        "verdict": verdict_on(reference.n, loss, revenue, weighted_distance, target_revenue).value,
+        "verdict": (Verdict.UNSOLVED if loss > certified(reference.n)
+                    else Verdict.DERIVED if weighted_distance <= STAY_BAR else Verdict.DIFFERENT).value,
         "utility_loss": loss,
         "arrival_weighted_distance": weighted_distance,
         "Pi": revenue,
@@ -141,6 +133,8 @@ def experiment(counts: Sequence[int] = COUNTS) -> Tuple[List[Dict[str, object]],
         write("scale_rules.csv", rules)
         write("scale.csv", rows)
         reference.under.release_history_tables()
+    matched = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
+    assert all(abs(r["Pi"] - r["Pi_target"]) <= REVENUE_BAR * payoff_scale(r["n"]) for r in matched), matched
     return rules, rows
 
 

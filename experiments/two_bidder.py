@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Sequence, Tuple
 
 from auction.game import PI, REIMBURSEMENT_POLICIES, Auction, ic_bound, region
-from auction.mccfr import BUDGET, Verdict, closed_forms, score, solve, stay_schedule
+from auction.mccfr import BUDGET, REVENUE_BAR, Verdict, closed_forms, score, solve, stay_schedule
 from auction.exact import CERTIFIED, utility_loss
 
 RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
@@ -98,8 +98,8 @@ def sweep(cells: Sequence[Cell]) -> List[Row]:
 
 def check(rows: Sequence[Row]) -> None:
     """What both experiments assert of every run they record."""
-    # Another equilibrium is a result, so it is counted. What is asserted is that it is certified.
-    assert all(float(r["utility_loss"]) <= CERTIFIED for r in rows if r["verdict"] == Verdict.DIFFERENT.value)
+    derived = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
+    assert all(abs(float(r["Pi"]) - float(r["Pi_closed_form"])) <= REVENUE_BAR for r in derived), derived
     beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
     assert {r["reimbursement_policy"] for r in beyond} <= {"targeted"}, beyond
     assert all(float(r["c"]) > ic_bound(float(r["q"])) for r in beyond), beyond

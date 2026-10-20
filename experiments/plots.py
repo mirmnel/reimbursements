@@ -266,10 +266,9 @@ def trace_panels() -> None:
 
 
 def save(fig: plt.Figure, name: str) -> None:
-    """Write one figure as a PDF for the paper and a PNG for a quick look."""
-    path = os.path.join(RESULTS, f"{name}.pdf")
-    fig.savefig(path)
-    fig.savefig(path.replace(".pdf", ".png"), dpi=200)
+    """Write one figure as a PNG."""
+    path = os.path.join(RESULTS, f"{name}.png")
+    fig.savefig(path, dpi=200)
     plt.close(fig)
     print(f"  wrote {path}")
 
