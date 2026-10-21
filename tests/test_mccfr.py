@@ -171,7 +171,7 @@ def test_the_distance_bar_is_read_on_the_path_the_closed_forms_take():
 
 def test_every_closed_form_is_an_equilibrium_inside_the_region():
     """Below the bound the theorem gives every price-only corner a sorting equilibrium, so matching it is reachable."""
-    for q, _, c in T.grid(T.VALIDATION) + T.grid(T.ROBUSTNESS):
+    for q, _, c in T.CELLS:
         if c > game.region(q):
             continue
         for rule in game.REIMBURSEMENT_POLICIES:

@@ -1,4 +1,4 @@
-"""Experiment 3: the rule the program writes at three, four and six bidders, and whether learning recovers it."""
+"""Experiment 2: the rule the program writes at three, four and six bidders, and whether learning recovers it."""
 
 from __future__ import annotations
 

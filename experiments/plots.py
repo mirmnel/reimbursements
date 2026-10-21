@@ -1,4 +1,4 @@
-"""Every figure in results: experiment 1's validation, experiment 2's ranking, experiment 3's scale."""
+"""Every figure in results: experiment 1's validation and ranking, experiment 2's scale."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from auction.game import (
 from auction.mccfr import REVENUE_BAR, STAY_BAR, Verdict, closed_forms, stay_schedule
 from auction.exact import CERTIFIED, utility_loss
 from experiments.scale import COUNTS, ROUNDS
-from experiments.two_bidder import RESULTS, SIGNAL_PROBABILITIES, VALIDATION, grid, margin
+from experiments.two_bidder import CELLS, RESULTS, SIGNAL_PROBABILITIES, margin
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 CORNER_COLOR = "#9a9993"  # the unnamed corners share one recessive grey
@@ -154,6 +154,10 @@ def by_cost_panels(runs: List[Dict[str, object]]) -> None:
     save(fig, "validation_by_cost")
 
 
+# Per-placement panels show only these, since neighbouring placements crowd each other.
+PLACEMENT_COLOR = {"inside": "#6da7ec", "bound": "#2a78d6", "outside": "#104281"}
+
+
 VERDICT_STYLE = {  # neutral steps, so verdicts never borrow a rule's hue
     Verdict.DERIVED: {"facecolor": "#3d3d3a", "hatch": None},
     Verdict.DIFFERENT: {"facecolor": "#9a9993", "hatch": None},
@@ -164,7 +168,7 @@ VERDICT_STYLE = {  # neutral steps, so verdicts never borrow a rule's hue
 def region_panels(runs: List[Dict[str, object]]) -> None:
     """Each rule's verdict counts placed on the (c, q) plane, against the bounds the theory draws there."""
     fig, axes = plt.subplots(1, len(VALIDATED_POLICIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
-    cells = sorted({(row["q"], row["c"]) for row in runs})
+    cells = sorted({(row["q"], row["c"]) for row in runs if row["placement"] in PLACEMENT_COLOR})
     costs, probabilities = np.linspace(0.0, 0.25, 200), np.linspace(0.6, 1.0, 200)
     width, height = 0.022, 0.025
     for axis, rule in zip(axes, VALIDATED_POLICIES):
@@ -185,7 +189,7 @@ def region_panels(runs: List[Dict[str, object]]) -> None:
             above = sorted(cost for row_q, cost in cells if row_q == q).index(c) % 2
             offset = height / 2 + 0.008
             axis.text(c, q + offset if above else q - offset, counts, ha="center", va="bottom" if above else "top",
-                      fontsize=6.5, color=INK)
+                      fontsize=5.5, color=INK)
         axis.set_xlim(0.0, 0.25)
         axis.set_ylim(0.6, 1.0)
         chrome(axis, RULE_LABEL[rule], "cost $c$", "signal probability $q$" if axis is axes[0] else "")
@@ -196,7 +200,6 @@ def region_panels(runs: List[Dict[str, object]]) -> None:
     save(fig, "validation_region")
 
 
-PLACEMENT_COLOR = {"inside": "#6da7ec", "bound": "#2a78d6", "outside": "#104281"}
 HIGH_PATH = ("open_high", "sigma1", "sigma2", "sigma3")
 
 
@@ -232,8 +235,8 @@ def schedule_panels(runs: List[Dict[str, object]]) -> None:
 
 def trace_panels() -> None:
     """Utility loss along every run, a row per rule, then the r=0 stay schedule along the same runs."""
-    points = read("validation_trace.csv", ("q", "iteration", "utility_loss", "sigma1", "sigma2", "sigma3"))
-    cells = grid(VALIDATION)
+    points = read("two_bidder_trace.csv", ("q", "iteration", "utility_loss", "sigma1", "sigma2", "sigma3"))
+    cells = [cell for cell in CELLS if cell[1] in PLACEMENT_COLOR]
     rows = len(VALIDATED_POLICIES) + 1
     fig, axes = plt.subplots(rows, len(cells), figsize=(7.0, 7.6), sharex=True, sharey="row", constrained_layout=True)
     for column, (q, placement, c) in enumerate(cells):
@@ -331,7 +334,7 @@ def ranking_figure() -> None:
 
 def gap_figure() -> None:
     """Learned minus closed-form revenue per policy and seed, the per-policy gaps the ranking margin is built from."""
-    rows = read("robustness.csv", ("q", "c", "Pi", "Pi_closed_form"))
+    rows = read("two_bidder.csv", ("q", "c", "Pi", "Pi_closed_form"))
     dodge = dict(zip(REIMBURSEMENT_POLICIES, np.linspace(-0.02, 0.02, len(REIMBURSEMENT_POLICIES))))
     fig, axes = plt.subplots(1, len(SIGNAL_PROBABILITIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
     for axis, q in zip(axes, SIGNAL_PROBABILITIES):
@@ -446,7 +449,7 @@ def rule_figure() -> None:
 
 def validation_figure() -> None:
     """Both validation panels side by side."""
-    runs = read("validation.csv", ("c", "q", "Pi", "Pi_closed_form", *SCHEDULE_MARKER))
+    runs = read("two_bidder.csv", ("c", "q", "Pi", "Pi_closed_form", *SCHEDULE_MARKER))
     fig, (left, right) = plt.subplots(1, 2, figsize=(7.0, 3.6), constrained_layout=True)
     revenue_panel(left, runs)
     schedule_panel(right, runs)

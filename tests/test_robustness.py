@@ -1,4 +1,4 @@
-"""Experiment 2's suite: the revenue ranking over the price-only corners, read off learned play."""
+"""Experiment 1's ranking suite: the revenue ranking over the price-only corners, read off learned play."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def test_back_loading_has_to_beat_every_corner_and_not_only_the_named_policies()
 
 
 def test_the_ranking_reads_learned_revenue_and_not_the_closed_form():
-    """The point of experiment 2 is the ranking at learned play, which can disagree with the derived one."""
+    """The point of the ranking is the order at learned play, which can disagree with the derived one."""
     (ranking,) = T.ranked(at_cell(backloaded=0.19))
     assert ranking["margin_closed_form"] > 0 > ranking["margin"], ranking
     assert abs(ranking["margin"] + 0.01) < 1e-12, ranking

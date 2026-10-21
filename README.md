@@ -1,23 +1,21 @@
 # Japanese Auctions with Costly Bidding
 
-Companion code for the paper's three learning experiments.
+Companion code for the paper's two learning experiments.
 
 ```bash
 pip install -e .                       # numpy, scipy, matplotlib
-python3 -m experiments.two_bidder validation  # experiment 1, ~11 min on 8 cores
-python3 -m experiments.two_bidder robustness  # experiment 2, ~16 min on 8 cores
-python3 -m experiments.scale                  # experiment 3, ~55 min
-python3 -m experiments.plots                  # every figure, from the CSVs in results/
-python3 tests/test_paper.py                   # the two-bidder closed forms, ~2 s (each test file runs on its own)
+python3 -m experiments.two_bidder     # experiment 1, ~75 min on 4 cores
+python3 -m experiments.scale          # experiment 2, ~55 min
+python3 -m experiments.plots          # every figure, from the CSVs in results/
+python3 tests/test_paper.py           # the two-bidder closed forms, ~2 s (each test file runs on its own)
 ```
 
 ## The experiments
 
 | experiment | script | writes |
 |---|---|---|
-| 1. Validation: MCCFR recovers the sorting equilibrium and revenue under no, full, least-cost and back-loaded reimbursement | `experiments/two_bidder.py validation` | `validation.csv` |
-| 2. Robustness: back-loading out-earns every other price-only corner and full reimbursement at learned play | `experiments/two_bidder.py robustness` | `robustness.csv`, `learned_ranking.csv` |
-| 3. Scale: at `n` in 3, 4, 6, solve `Gamma^0`, write the minimum-cost rule `r*`, and test whether learning recovers the reference | `experiments/scale.py` | `scale_rules.csv`, `scale.csv` |
+| 1. Two bidders: MCCFR recovers the sorting equilibrium and revenue under no, full, least-cost and back-loaded reimbursement, and back-loading out-earns every other price-only corner and full reimbursement at learned play | `experiments/two_bidder.py` | `two_bidder.csv`, `two_bidder_trace.csv`, `learned_ranking.csv` |
+| 2. Scale: at `n` in 3, 4, 6, solve `Gamma^0`, write the minimum-cost rule `r*`, and test whether learning recovers the reference | `experiments/scale.py` | `scale_rules.csv`, `scale.csv` |
 
 Every run gets one of three verdicts. `derived` means it reached an equilibrium that sits at the target, and the
 target is itself an equilibrium. `different` means it reached another equilibrium. `unsolved` means it did not reach
@@ -37,7 +35,7 @@ beyond about seven bidders. `tests/test_scale.py` checks that the two paths agre
 
 `mccfr.solve(symmetry_restricted=True)` gives every bidder one shared regret table. That makes the search symmetric
 by construction, which is how the two-bidder closed forms (stated within symmetric profiles) are tested.
-Experiment 3 also runs an unrestricted arm at three and four bidders. At six its profiles are too large to walk,
+Experiment 2 also runs an unrestricted arm at three and four bidders. At six its profiles are too large to walk,
 so that arm stops at four.
 
 ## Units

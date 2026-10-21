@@ -1,14 +1,13 @@
-"""Experiments 1 and 2: whether MCCFR recovers the two-bidder closed forms, and whether back-loading still wins."""
+"""Experiment 1: whether MCCFR recovers the two-bidder closed forms, and whether back-loading wins at learned play."""
 
 from __future__ import annotations
 
 import csv
 import os
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from typing import Dict, List, Sequence, Tuple
 
-from auction.game import REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, ic_bound, region
+from auction.game import REIMBURSEMENT_POLICIES, Auction, ic_bound, region
 from auction.mccfr import BUDGET, REVENUE_BAR, Verdict, closed_forms, score, solve, stay_schedule
 from auction.exact import CERTIFIED, utility_loss
 
@@ -19,17 +18,12 @@ SEEDS = 10
 # Costs are placed as multiples of region(q). Every q is above one half, so the incentive bound binds.
 PLACEMENTS = {"inside": 0.5, "under": 0.9, "bound": 1.0, "over": 1.1, "outside": 1.5}
 
-# Experiment 1 samples the (c, q) plane rather than crossing it.
-VALIDATION = {0.7: ("inside", "bound", "outside"), 0.75: ("bound", "outside"), 0.9: ("bound", "outside")}
-
-# Experiment 2 runs every placement at two signal probabilities.
-SIGNAL_PROBABILITIES = (0.7, 0.9)
-ROBUSTNESS = {q: tuple(PLACEMENTS) for q in SIGNAL_PROBABILITIES}
+SIGNAL_PROBABILITIES = (0.7, 0.75, 0.9)
+CELLS = [(q, placement, share * region(q)) for q in SIGNAL_PROBABILITIES for placement, share in PLACEMENTS.items()]
 
 TRACE = 1_000  # iterations between the snapshots a run is scored at along the way
 
 Row = Dict[str, object]
-Cell = Tuple[float, str, float]
 
 
 def write(name: str, rows: Sequence[Row]) -> None:
@@ -42,11 +36,6 @@ def write(name: str, rows: Sequence[Row]) -> None:
         writer.writeheader()
         writer.writerows(rows)
     print(f"wrote {path} ({len(rows)} rows)")
-
-
-def grid(cells: Dict[float, Sequence[str]]) -> List[Cell]:
-    """A grid's cells, each cost placed as a multiple of the region bound at its signal probability."""
-    return [(q, placement, PLACEMENTS[placement] * region(q)) for q, named in cells.items() for placement in named]
 
 
 def run(auction: Auction, placement: str, seed: int) -> Row:
@@ -82,13 +71,13 @@ def run_job(job: Tuple[str, float, str, float, int]) -> Row:
     return run(Auction(q=q, c=c, reimbursement_policy=rule), placement, seed)
 
 
-def sweep(cells: Sequence[Cell], policies: Sequence[str]) -> List[Row]:
+def sweep() -> List[Row]:
     """Every policy at every cell at every seed, with verdict counts printed per cell."""
-    jobs = [(rule, q, placement, c, seed) for rule in policies for (q, placement, c) in cells for seed in range(SEEDS)]
+    jobs = [(rule, q, placement, c, seed) for rule in REIMBURSEMENT_POLICIES for (q, placement, c) in CELLS for seed in range(SEEDS)]
     with ProcessPoolExecutor() as pool:
         rows = list(pool.map(run_job, jobs))
-    for rule in policies:
-        for q, placement, c in cells:
+    for rule in REIMBURSEMENT_POLICIES:
+        for q, placement, c in CELLS:
             at = [r for r in rows if (r["reimbursement_policy"], r["q"], r["placement"]) == (rule, q, placement)]
             counts = " ".join(f"{v.value} {sum(r['verdict'] == v.value for r in at)}" for v in Verdict)
             print(f"  {rule:10s} q={q:.2f} {placement:8s} c={c:.4f}  {counts}")
@@ -96,7 +85,7 @@ def sweep(cells: Sequence[Cell], policies: Sequence[str]) -> List[Row]:
 
 
 def check(rows: Sequence[Row]) -> None:
-    """What both experiments assert of every run they record."""
+    """What the experiment asserts of every run it records."""
     derived = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
     assert all(abs(float(r["Pi"]) - float(r["Pi_closed_form"])) <= REVENUE_BAR for r in derived), derived
     beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
@@ -144,30 +133,19 @@ def report(ranking: Sequence[Row]) -> None:
               f"  learned margin {spread}  closed form {float(at[0]['margin_closed_form']):+.4f}")
 
 
-def validation() -> List[Row]:
-    """Experiment 1: ten seeds at each sampled cell under each policy the paper prints closed forms for."""
-    rows = sweep(grid(VALIDATION), VALIDATED_POLICIES)
-    write("validation_trace.csv", [point for row in rows for point in row["trace"]])
-    write("validation.csv", rows)  # before the claims are checked, so a failed claim keeps its runs
+def main() -> None:
+    """Experiment 1: ten seeds at every cell under every policy, checked against theory and ranked at learned play."""
+    rows = sweep()
+    ranking = ranked(rows)
+    report(ranking)
+    # Written before the claims are checked, so a failed claim keeps its runs.
+    write("two_bidder_trace.csv", [point for row in rows for point in row["trace"]])
+    write("two_bidder.csv", rows)
+    write("learned_ranking.csv", ranking)
     check(rows)
     inside = [r for r in rows if (r["reimbursement_policy"], r["placement"]) == ("zero", "inside")]
     assert all(float(r["utility_loss"]) <= CERTIFIED for r in inside), inside
-    return rows
-
-
-def robustness() -> List[Row]:
-    """Experiment 2: every price-only corner and full reimbursement across the grid, ranked at learned play."""
-    rows = sweep(grid(ROBUSTNESS), REIMBURSEMENT_POLICIES)
-    write("robustness.csv", rows)
-    check(rows)
-    ranking = ranked(rows)
-    report(ranking)
-    write("learned_ranking.csv", ranking)
-    return ranking
 
 
 if __name__ == "__main__":
-    experiments = {"validation": validation, "robustness": robustness}
-    for name in sys.argv[1:] or experiments:
-        print(f"== {name} ==")
-        experiments[name]()
+    main()
