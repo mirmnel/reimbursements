@@ -1,8 +1,9 @@
-"""Claims beyond two bidders: the speed of six of them, the orbit reduction, the solver, and experiment 3."""
+"""Claims beyond two bidders: the speed of six of them, the orbit reduction, the solver, and the scale experiment."""
 
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -10,7 +11,6 @@ from auction import game as G
 from auction import exact as A
 from experiments import scale
 from auction import symmetric as S
-from auction.mccfr import Verdict
 from test_game import enumerated, random_symmetric
 from test_paper import main
 
@@ -68,8 +68,16 @@ def test_the_deviation_gain_agrees_at_every_information_set():
     for auction in settings((2, 3, 4)):
         sigma = random_symmetric(auction, 3)
         gain, reach = S.gains(auction, sigma)
-        for position, (_, state, signal) in enumerate(auction.info_sets):
-            want = enumerated(A.counterfactual_gain, auction, sigma, position)
+        for position, (bidder, state, signal) in enumerate(auction.info_sets):
+            # Per history: own earlier sets stay, so only opponent reach weights the gain.
+            base = sigma.copy()
+            for (owner, earlier, own), at in auction.info_index.items():
+                if owner == bidder and own == signal and earlier.round < state.round:
+                    base[at] = 1.0
+            staying, exiting = base.copy(), base.copy()
+            staying[position], exiting[position] = 1.0, 0.0
+            want = (enumerated(A.evaluate, auction, staying).payoff[bidder]
+                    - enumerated(A.evaluate, auction, exiting).payoff[bidder])
             assert abs(gain[auction.orbit_of_state[state], signal] - want) < TIGHT, (auction, position)
 
 
@@ -90,7 +98,7 @@ def test_an_asymmetric_profile_still_routes_to_the_per_history_path():
     assert abs(outcome.payoff[1]) < TIGHT
 
 
-# --- experiment 3, without running it ---------------------------------------
+# --- the scale experiment, without running it -------------------------------
 
 
 def test_the_experiment_runs_the_three_bidder_counts_the_paper_names():
@@ -120,8 +128,16 @@ def test_one_bidder_off_the_target_counts_as_fully_as_all_of_them():
     """The distance is the worst bidder's, so the others matching cannot average one deviant away."""
     auction = scale.auction_at(3, "full")
     target = random_symmetric(auction, 4)
+    reference = scale.Reference(3, None, target, None, auction)
     one = np.where([b == 0 for b, _, _ in auction.info_sets], 1.0 - target, target)
-    assert abs(scale.distance_from(auction, one, target) - scale.distance_from(auction, 1.0 - target, target)) < TIGHT
+    distance, solved_at = {}, scale.solved_at
+    try:
+        for name, profile in (("one", one), ("all", 1.0 - target)):
+            scale.solved_at = lambda *_, profile=profile: SimpleNamespace(profile=profile)
+            distance[name] = scale.recovery_row(reference, 0, True)["arrival_weighted_distance"]
+    finally:
+        scale.solved_at = solved_at
+    assert abs(distance["one"] - distance["all"]) < TIGHT, distance
 
 
 if __name__ == "__main__":

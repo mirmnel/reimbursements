@@ -84,14 +84,6 @@ def sweep() -> List[Row]:
     return rows
 
 
-def check(rows: Sequence[Row]) -> None:
-    """What the experiment asserts of every run it records."""
-    derived = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
-    assert all(abs(float(r["Pi"]) - float(r["Pi_closed_form"])) <= REVENUE_BAR for r in derived), derived
-    beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
-    assert all(float(r["c"]) > ic_bound(float(r["q"])) for r in beyond), beyond
-
-
 def margin(earned: Dict[str, float]) -> float:
     """What back-loading earns above the best other policy."""
     return earned["backloaded"] - max(value for rule, value in earned.items() if rule != "backloaded")
@@ -122,8 +114,10 @@ def ranked(rows: Sequence[Row]) -> List[Row]:
     return ranking
 
 
-def report(ranking: Sequence[Row]) -> None:
-    """Print, per cell, how many seeds counted and how many of those back-loading won."""
+def main() -> None:
+    """Experiment 1: ten seeds at every cell under every policy, checked against theory and ranked at learned play."""
+    rows = sweep()
+    ranking = ranked(rows)
     for q, placement in dict.fromkeys((r["q"], r["placement"]) for r in ranking):
         at = [r for r in ranking if (r["q"], r["placement"]) == (q, placement)]
         margins = [float(r["margin"]) for r in at if r["counted"]]
@@ -131,18 +125,14 @@ def report(ranking: Sequence[Row]) -> None:
         print(f"  q={q:.2f} {placement:8s} counted {len(margins)}/{len(at)}"
               f"  back-loaded wins {sum(bool(r['backloaded_wins']) for r in at)}"
               f"  learned margin {spread}  closed form {float(at[0]['margin_closed_form']):+.4f}")
-
-
-def main() -> None:
-    """Experiment 1: ten seeds at every cell under every policy, checked against theory and ranked at learned play."""
-    rows = sweep()
-    ranking = ranked(rows)
-    report(ranking)
     # Written before the claims are checked, so a failed claim keeps its runs.
     write("two_bidder_trace.csv", [point for row in rows for point in row["trace"]])
     write("two_bidder.csv", rows)
     write("learned_ranking.csv", ranking)
-    check(rows)
+    derived = [r for r in rows if r["verdict"] == Verdict.DERIVED.value]
+    assert all(abs(float(r["Pi"]) - float(r["Pi_closed_form"])) <= REVENUE_BAR for r in derived), derived
+    beyond = [r for r in rows if float(r["closed_form_loss"]) > CERTIFIED]
+    assert all(float(r["c"]) > ic_bound(float(r["q"])) for r in beyond), beyond
     inside = [r for r in rows if (r["reimbursement_policy"], r["placement"]) == ("zero", "inside")]
     assert all(float(r["utility_loss"]) <= CERTIFIED for r in inside), inside
 

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy.optimize import linprog
 
 from . import symmetric
 from .exact import RESOLVED, certified
-from .game import Auction, ReimbursementPolicy, by_orbit
+from .game import Auction
 
 
 BELIEF_TREMBLE = 0.01  # rate the off-path beliefs are trembled at, so every orbit carries a constraint
@@ -34,18 +34,6 @@ class Implementation:
     status: str
 
 
-def one_shot_regret(gain: float, stay_prob: float) -> float:
-    """What mixing at ``stay_prob`` costs against taking the better of the two actions outright."""
-    return (1 - stay_prob) * max(gain, 0.0) + stay_prob * max(-gain, 0.0)
-
-
-def stay_mass(auction: Auction, sigma: np.ndarray) -> np.ndarray:
-    """Expected number of bidder-stays at each orbit, which is what a reimbursement there is paid on."""
-    # Arrival rather than counterfactual reach, since a bidder is only paid where it stayed.
-    stay = symmetric.anonymise(auction, sigma)
-    return auction.n * (symmetric.bucket_arrival(auction, sigma) * stay).sum(axis=1)
-
-
 def gain_coefficients(
     auction: Auction, sigma: np.ndarray, beliefs: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -59,16 +47,13 @@ def gain_coefficients(
     return base, slope, reach
 
 
-def trembled(sigma: np.ndarray, tremble: float) -> np.ndarray:
-    """``sigma`` mixed toward uniform, which is the belief every unreached orbit is judged under."""
-    return (1.0 - tremble) * sigma + tremble * 0.5
-
-
 def sequential_rationality(auction: Auction, sigma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """One row per action the target prescribes, bounding what deviating from it may be worth."""
     stay = np.clip(symmetric.anonymise(auction, sigma), 0.0, 1.0)
     base, slope, reach = gain_coefficients(auction, sigma)
-    off_base, off_slope, off_reach = gain_coefficients(auction, sigma, trembled(sigma, BELIEF_TREMBLE))
+    # Every unreached orbit is judged under beliefs mixed toward uniform.
+    beliefs = (1.0 - BELIEF_TREMBLE) * sigma + BELIEF_TREMBLE * 0.5
+    off_base, off_slope, off_reach = gain_coefficients(auction, sigma, beliefs)
     full = np.full(len(auction.orbits), auction.c)
     floor = certified(auction.n)
     rows, bounds = [], []
@@ -85,9 +70,11 @@ def sequential_rationality(auction: Auction, sigma: np.ndarray) -> Tuple[np.ndar
             # Normalised by the reach, which a gain is always read at, so that a set reached once in a
             # trillion does not enter the program with coefficients a trillion times smaller.
             normalised, slopes = constant / weight, coefficient / weight
-            at_full = one_shot_regret(normalised + slopes @ full, stay[orbit, signal])
+            # What mixing costs against taking the better action outright, at full reimbursement.
+            gain, p = normalised + slopes @ full, stay[orbit, signal]
+            at_full = (1 - p) * max(gain, 0.0) + p * max(-gain, 0.0)
             allowed = max(floor, at_full) + FEASIBILITY_MARGIN
-            # one_shot_regret at this set stays inside the allowance exactly on this pair.
+            # That regret at this set stays inside the allowance exactly on this pair.
             for sign, mixed in ((1.0, 1.0 - stay[orbit, signal]), (-1.0, stay[orbit, signal])):
                 if mixed > MIXED_FLOOR:
                     rows.append(sign * slopes)
@@ -97,7 +84,10 @@ def sequential_rationality(auction: Auction, sigma: np.ndarray) -> Tuple[np.ndar
 
 def minimum_cost(auction: Auction, sigma: np.ndarray) -> Implementation:
     """Solve for the cheapest per-orbit reimbursement leaving every action the target prescribes optimal."""
-    objective = stay_mass(auction, sigma)
+    # Expected bidder-stays per orbit, by arrival rather than counterfactual reach, since a bidder is
+    # only paid where it stayed.
+    stay = symmetric.anonymise(auction, sigma)
+    objective = auction.n * (symmetric.bucket_arrival(auction, sigma) * stay).sum(axis=1)
     rows, bounds = sequential_rationality(auction, sigma)
     solution = linprog(objective, A_ub=rows, b_ub=bounds, bounds=(0.0, auction.c), method="highs")
     chosen = solution.x if solution.success else np.full(len(auction.orbits), auction.c)
@@ -108,17 +98,3 @@ def minimum_cost(auction: Auction, sigma: np.ndarray) -> Implementation:
         full_bill=float(objective.sum() * auction.c),
         status="optimal" if solution.success else solution.message,
     )
-
-
-def as_policy(auction: Auction, refunds: np.ndarray) -> ReimbursementPolicy:
-    """Read a per-orbit reimbursement vector back as a policy an ``Auction`` can be built on."""
-    return by_orbit(dict(zip(auction.orbits, (float(value) for value in refunds))))
-
-
-def schedule_of(auction: Auction, refunds: np.ndarray) -> Dict[str, float]:
-    """What the rule pays per stay in each round, averaged over the orbits of that round."""
-    rounds = np.array([round_index for round_index, _ in auction.orbits])
-    return {
-        f"r_t{round_index}": float(refunds[rounds == round_index].mean())
-        for round_index in range(auction.rounds)
-    }

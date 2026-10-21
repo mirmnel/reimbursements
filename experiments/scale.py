@@ -9,7 +9,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 
 from auction import implement, symmetric
-from auction.game import Auction, equicorrelated, payoff_scale
+from auction.game import Auction, by_orbit, equicorrelated, payoff_scale
 from auction.implement import Implementation
 from auction.mccfr import BUDGET, REVENUE_BAR, STAY_BAR, Solved, Verdict, solve
 from auction.exact import certified, evaluate, utility_loss
@@ -60,13 +60,14 @@ def reference_at(n: int) -> Reference:
     frictionless.release_history_tables()
     costly = auction_at(n, "full")
     chosen = implement.minimum_cost(costly, profile)
-    under = auction_at(n, implement.as_policy(costly, chosen.refunds))
+    under = auction_at(n, by_orbit(dict(zip(costly.orbits, map(float, chosen.refunds)))))
     return Reference(n, frictionless, profile, chosen, under)
 
 
 def rule_row(reference: Reference) -> Dict[str, object]:
     """What the program chose at one bidder count, beside what paying in full would have cost."""
     chosen, under, free = reference.chosen, reference.under, reference.frictionless
+    rounds = np.array([round_index for round_index, _ in under.orbits])
     row: Dict[str, object] = {
         "n": reference.n,
         "c": under.c,
@@ -76,21 +77,15 @@ def rule_row(reference: Reference) -> Dict[str, object]:
         "full_bill": chosen.full_bill,
         "target_revenue": evaluate(under, reference.profile).revenue,
         "target_loss_under_rule": float(utility_loss(under, reference.profile)),
-    } | implement.schedule_of(under, chosen.refunds)
+    } | {  # per stay in each round, averaged over that round's orbits
+        f"r_t{t}": float(chosen.refunds[rounds == t].mean()) for t in range(under.rounds)
+    }
     assert row["status"] == "optimal", row
     assert chosen.bill <= chosen.full_bill + 1e-12, row
     # The reference has to be an equilibrium where bidding is free and stay one under the rule.
     assert float(row["reference_loss"]) <= certified(reference.n), row
     assert float(row["target_loss_under_rule"]) <= certified(reference.n), row
     return row
-
-
-def distance_from(under: Auction, sigma: np.ndarray, target: np.ndarray) -> float:
-    """The worst bidder's arrival-weighted distance, so one bidder off the target is not averaged away."""
-    # Most sets at this scale are arrived at a handful of times in a million, so weight by the target's arrival.
-    arrived = symmetric.bucket_arrival(under, target).ravel()[under.orbit_index]
-    bidder = [b for b, _, _ in under.info_sets]
-    return float(max(np.bincount(bidder, np.abs(sigma - target) * arrived) / np.bincount(bidder, arrived)))
 
 
 def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str, object]:
@@ -101,7 +96,12 @@ def recovery_row(reference: Reference, seed: int, restricted: bool) -> Dict[str,
     loss = float(utility_loss(under, solved.profile))
     revenue = evaluate(under, solved.profile).revenue
     seconds = time.perf_counter() - started
-    weighted_distance = distance_from(under, solved.profile, target)
+    # The worst bidder's, so one bidder off the target is not averaged away. Weighted by the target's
+    # arrival, since most sets at this scale are arrived at a handful of times in a million.
+    arrived = symmetric.bucket_arrival(under, target).ravel()[under.orbit_index]
+    bidder = [b for b, _, _ in under.info_sets]
+    off = np.abs(solved.profile - target) * arrived
+    weighted_distance = float(max(np.bincount(bidder, off) / np.bincount(bidder, arrived)))
     target_revenue = evaluate(under, target).revenue
     row: Dict[str, object] = {
         "n": reference.n,

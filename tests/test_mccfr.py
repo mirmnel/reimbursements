@@ -34,41 +34,25 @@ def test_full_reimbursement_leaves_the_bidders_the_frictionless_game():
 # --- the symmetry restriction ------------------------------------------------
 
 
-def relabelled(permutation, info_set):
-    """Where an information set lands when the bidders are renamed by ``permutation``."""
-    bidder, state, signal = info_set
-    exits = [0] * len(state.exits)
-    for member, exited in enumerate(state.exits):
-        exits[permutation[member]] = exited
-    active = tuple(sorted(permutation[member] for member in state.active))
-    return (permutation[bidder], game.State(state.round, active, tuple(exits)), signal)
-
-
-def same_orbit(auction, left, right):
-    """Whether some renaming of the bidders carries one information set onto the other."""
-    return any(
-        relabelled(permutation, auction.info_sets[left]) == auction.info_sets[right]
-        for permutation in itertools.permutations(range(auction.n))
-    )
+def symmetrise(auction, sigma):
+    """The symmetric profile in which every bidder plays the bucket mean of ``sigma``."""
+    return S.anonymise(auction, sigma).ravel()[auction.orbit_index]
 
 
 def orbits(auction, table):
-    """Rows of ``table`` grouped by the orbit of the information set they sit at."""
+    """Rows of ``table`` grouped by the orbit of their information set under renaming the bidders."""
+    # Built from the permutations rather than the solver's bucket key, so a wrong key cannot agree with itself.
     grouped = {}
-    for position, (_, state, signal) in enumerate(auction.info_sets):
-        grouped.setdefault((auction.orbit_of_state[state], signal), []).append(table[position])
+    for position, (bidder, state, signal) in enumerate(auction.info_sets):
+        images = set()
+        for permutation in itertools.permutations(range(auction.n)):
+            exits = [0] * auction.n
+            for member, exited in enumerate(state.exits):
+                exits[permutation[member]] = exited
+            active = tuple(sorted(permutation[member] for member in state.active))
+            images.add((permutation[bidder], game.State(state.round, active, tuple(exits)), signal))
+        grouped.setdefault(frozenset(images), []).append(table[position])
     return grouped
-
-
-def test_the_shared_cells_are_the_orbits_of_relabelling_the_bidders():
-    """Two information sets share a cell exactly when an exchangeable bidder could be at either."""
-    # Orbits are built from the permutations themselves rather than from a bucket key, so a map
-    # keyed on the wrong thing fails here instead of agreeing with the solver's own reading.
-    for auction in (game.Auction(q=Q, c=C), game.Auction(q=Q, c=C, n=3)):
-        cells = M.shared_cells(auction)
-        for left in range(len(auction.info_sets)):
-            for right in range(len(auction.info_sets)):
-                assert (cells[left] == cells[right]) == same_orbit(auction, left, right), (left, right)
 
 
 def test_under_the_restriction_every_bidder_plays_the_same_strategy_exactly():
@@ -87,9 +71,9 @@ def test_the_restriction_is_on_the_search_and_not_an_average_taken_afterwards():
     apart, restricted = M.solve(auction, seed=0, iterations=ITERATIONS), M.solve(
         auction, seed=0, iterations=ITERATIONS, symmetry_restricted=True
     )
-    assert not S.is_symmetric(auction, apart.profile)
-    assert S.is_symmetric(auction, restricted.profile)
-    assert not np.allclose(restricted.profile, S.symmetrise(auction, apart.profile), atol=0.01)
+    assert not S.applies(auction, apart.profile)
+    assert S.applies(auction, restricted.profile)
+    assert not np.allclose(restricted.profile, symmetrise(auction, apart.profile), atol=0.01)
 
 
 # --- the average profile ----------------------------------------------------
@@ -137,7 +121,7 @@ def test_nothing_in_the_scoring_path_symmetrises_the_profile():
     """The bidders disagree over who concedes, and the bucket mean of that is a profile neither of them plays."""
     auction, _ = target("zero")
     asymmetric = bully(auction)
-    mean = S.symmetrise(auction, asymmetric)
+    mean = symmetrise(auction, asymmetric)
     assert not np.allclose(asymmetric, mean)
     got, bucket = M.score(auction, asymmetric), M.score(auction, mean)
     assert abs(got.utility_loss - A.utility_loss(auction, asymmetric)) < TIGHT, got

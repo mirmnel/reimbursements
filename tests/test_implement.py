@@ -22,16 +22,16 @@ def costly(n=3, c=C, rounds=4, **overrides):
 # --- the algebra the program rests on ---------------------------------------
 
 
-def test_the_objective_is_the_reimbursement_the_reduction_already_reports():
-    """Expected stays per orbit times what is paid there is the bill, read off an independent path."""
+def test_the_bill_is_the_reimbursement_the_reduction_already_reports():
+    """The program's bill, and the bill at full reimbursement, read off an independent path."""
     for n in (2, 3, 4):
         auction = costly(n=n)
         sigma = random_symmetric(auction, 4)
-        mass = I.stay_mass(auction, sigma)
-        rng = np.random.default_rng(n)
-        for refunds in (np.full(len(auction.orbits), C), rng.uniform(0.0, C, len(auction.orbits))):
+        chosen = I.minimum_cost(auction, sigma)
+        full = np.full(len(auction.orbits), C)
+        for bill, refunds in ((chosen.bill, chosen.refunds), (chosen.full_bill, full)):
             want = S.outcome(auction, sigma, refunds).reimbursement
-            assert abs(float(mass @ refunds) - want) < TIGHT, (n, want)
+            assert abs(bill - want) < TIGHT, (n, want)
 
 
 def test_the_gain_coefficients_reproduce_the_gain_at_a_rule_they_never_saw():

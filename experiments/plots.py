@@ -39,12 +39,6 @@ SCHEDULE_LABEL = {
 }
 
 
-def equilibrium(rule: str, c: float, q: float) -> bool:
-    """Whether the closed form under one policy at one cell is an equilibrium."""
-    auction = Auction(q=q, c=c, reimbursement_policy=rule)
-    return utility_loss(auction, closed_forms(auction)[0]) <= CERTIFIED
-
-
 def span_of(q: float) -> float:
     """Each q's x range, wide enough to hold its outside placement."""
     return 1.6 * region(q)
@@ -135,7 +129,8 @@ def by_cost_panels(runs: List[Dict[str, object]]) -> None:
         for rule in VALIDATED_POLICIES:
             color = RULE_COLOR[rule]
             curve = np.array([closed_form_revenue(rule, c, q) for c in span])
-            held = np.array([equilibrium(rule, c, q) for c in span])
+            cells = [Auction(q=q, c=c, reimbursement_policy=rule) for c in span]
+            held = np.array([utility_loss(auction, closed_forms(auction)[0]) <= CERTIFIED for auction in cells])
             axis.plot(span, np.where(held, curve, np.nan), color=color, linewidth=2)
             axis.plot(span, np.where(held, np.nan, curve), color=color, linewidth=1.2, linestyle=(0, (2, 2)))
             at = [row for row in runs if row["reimbursement_policy"] == rule and row["q"] == q]
@@ -292,11 +287,6 @@ def read(name: str, numeric: tuple) -> List[Dict[str, object]]:
     return rows
 
 
-def theory_margin(c: float, q: float) -> float:
-    """How far back-loading's closed-form revenue sits above the best other policy's."""
-    return margin({rule: closed_form_revenue(rule, c, q) for rule in REIMBURSEMENT_POLICIES})
-
-
 def bounds(axis: plt.Axes, q: float) -> None:
     """The incentive bound, with the stretch past it where the theorem is silent greyed out."""
     bound = region(q)
@@ -315,7 +305,8 @@ def ranking_figure() -> None:
     for axis, q in zip(axes, SIGNAL_PROBABILITIES):
         span = np.linspace(0.0, region(q), 200)
         axis.axhline(0.0, color=INK, linewidth=0.8)
-        axis.plot(span, [theory_margin(c, q) for c in span], color=color, linewidth=2)
+        theory = [margin({rule: closed_form_revenue(rule, c, q) for rule in REIMBURSEMENT_POLICIES}) for c in span]
+        axis.plot(span, theory, color=color, linewidth=2)
         for row in (row for row in rows if row["q"] == q):
             counted = row["counted"] == "True"
             axis.scatter(row["c"] + jitter.uniform(-0.006, 0.006) * span_of(q), row["margin"], s=16,

@@ -66,39 +66,27 @@ def reach(auction: Auction, sigma: np.ndarray) -> Dict[State, np.ndarray]:
     return reached
 
 
-def counterfactual_gain(auction: Auction, sigma: np.ndarray, position: int) -> float:
-    """Gain from staying rather than exiting at ``position``, weighted by opponent reach only."""
-    if symmetric.applies(auction, sigma):
-        gain, _ = symmetric.gains(auction, sigma)
-        _, state, signal = auction.info_sets[position]
-        return float(gain[auction.orbit_of_state[state], signal])
-    bidder, state, signal = auction.info_sets[position]
-    base = sigma.copy()
-    for other, earlier in auction.info_index.items():
-        if other[0] == bidder and other[2] == signal and other[1].round < state.round:
-            base[earlier] = 1.0
-    staying, exiting = base.copy(), base.copy()
-    staying[position], exiting[position] = 1.0, 0.0
-    return float(evaluate(auction, staying).payoff[bidder] - evaluate(auction, exiting).payoff[bidder])
-
-
-def best_response(auction: Auction, sigma: np.ndarray, bidder: int) -> np.ndarray:
-    """Exact best response of ``bidder``, by one backward sweep on ``counterfactual_gain``."""
-    response = sigma.copy()
-    for position in reversed(range(len(auction.info_sets))):  # round-sorted, so this sweeps backwards
-        if auction.info_sets[position][0] == bidder:
-            gain = counterfactual_gain(auction, response, position)
-            response[position] = float(gain > 0.0)
-    return response
-
-
 def utility_loss(auction: Auction, sigma: np.ndarray) -> float:
     """Utility loss: the largest gain any bidder gets from a full best response."""
     if symmetric.applies(auction, sigma):
         return symmetric.utility_loss(auction, sigma)
     baseline = evaluate(auction, sigma).payoff
-    return max(
-        evaluate(auction, best_response(auction, sigma, bidder)).payoff[bidder] - baseline[bidder]
-        for bidder in range(auction.n)
-    )
+    gains = []
+    for bidder in range(auction.n):
+        response = sigma.copy()  # an exact best response, by one backward sweep
+        for position in reversed(range(len(auction.info_sets))):  # round-sorted
+            owner, state, signal = auction.info_sets[position]
+            if owner != bidder:
+                continue
+            # Gain from staying over exiting, weighted by opponent reach only.
+            base = response.copy()
+            for other, earlier in auction.info_index.items():
+                if other[0] == bidder and other[2] == signal and other[1].round < state.round:
+                    base[earlier] = 1.0
+            staying, exiting = base.copy(), base.copy()
+            staying[position], exiting[position] = 1.0, 0.0
+            gain = evaluate(auction, staying).payoff[bidder] - evaluate(auction, exiting).payoff[bidder]
+            response[position] = float(gain > 0.0)
+        gains.append(evaluate(auction, response).payoff[bidder] - baseline[bidder])
+    return max(gains)
 

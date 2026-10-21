@@ -56,13 +56,6 @@ def averaged(strategy_sum: np.ndarray, regret: np.ndarray) -> np.ndarray:
     return np.where(total > 0.0, weighed, matched(regret))
 
 
-def shared_cells(auction: Auction) -> np.ndarray:
-    """Each information set's cell in one shared table, being its orbit under relabelling the bidders."""
-    buckets: Dict[Tuple[int, int], int] = {}
-    keys = [(auction.orbit_of_state[state], signal) for _, state, signal in auction.info_sets]
-    return np.array([buckets.setdefault(key, len(buckets)) for key in keys])
-
-
 def solve(
     auction: Auction,
     seed: int = 0,
@@ -76,7 +69,12 @@ def solve(
     rng = np.random.default_rng(seed)
     initial_regret = INITIAL_REGRET * payoff_scale(auction.n)
     index = auction.info_index
-    cells = shared_cells(auction) if symmetry_restricted else np.arange(len(auction.info_sets))
+    if symmetry_restricted:  # a set's cell is its orbit under relabelling the bidders
+        buckets: Dict[Tuple[int, int], int] = {}
+        keys = [(auction.orbit_of_state[state], signal) for _, state, signal in auction.info_sets]
+        cells = np.array([buckets.setdefault(key, len(buckets)) for key in keys])
+    else:
+        cells = np.arange(len(auction.info_sets))
     cell_of = cells.tolist()  # plain ints, which the traversal indexes with far more cheaply
     # Plain lists, as numpy's per-call overhead dominates arithmetic on two floats.
     regret = rng.uniform(0.0, initial_regret, (int(cells.max()) + 1, 2)).tolist()  # a random start per seed
@@ -168,24 +166,18 @@ def stay_schedule(auction: Auction, sigma: np.ndarray) -> Dict[str, float]:
     }
 
 
-def visit_probability(auction: Auction, sigma: np.ndarray) -> np.ndarray:
-    """Probability sampled play under ``sigma`` actually arrives at each information set."""
-    reached = reach(auction, sigma)
-    return np.array(
-        [
-            float(np.where(auction.profiles[:, bidder] == signal, auction.prior, 0.0) @ reached[state])
-            for (bidder, state, signal) in auction.info_sets
-        ]
-    )
-
-
 def score(auction: Auction, sigma: np.ndarray) -> Score:
     """Judge a behaviour profile against the closed forms, by a path that never reads a regret table."""
     derived, _ = closed_forms(auction)
     loss = float(utility_loss(auction, sigma))
     # Measured where the target plays, as the paper's on-path distance. Off the path the closed form
     # is an arbitrary tie-break the run has no experience of.
-    on_path = visit_probability(auction, derived) > RESOLVED
+    reached = reach(auction, derived)
+    visits = np.array([
+        float(np.where(auction.profiles[:, bidder] == signal, auction.prior, 0.0) @ reached[state])
+        for (bidder, state, signal) in auction.info_sets
+    ])
+    on_path = visits > RESOLVED
     near = np.abs(sigma - derived)[on_path].max() <= STAY_BAR
     if loss > CERTIFIED:
         verdict = Verdict.UNSOLVED

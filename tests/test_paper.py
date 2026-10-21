@@ -5,8 +5,14 @@ from __future__ import annotations
 
 from auction import game as G
 from auction import exact as A
+from auction import symmetric as S
 
 Q, C, TIGHT = 0.5, 0.05, 1e-9
+
+
+def gain_at(auction, sigma, state, signal):
+    """Gain from staying rather than exiting at ``state`` on ``signal``, weighted by opponent reach only."""
+    return S.gains(auction, sigma)[0][auction.orbit_of_state[state], signal]
 
 
 def target(reimbursement_policy, c=C, q=Q, **overrides):
@@ -80,11 +86,10 @@ def test_paper_targets_are_exact_equilibria():
 def test_endgame_is_knife_edge_and_the_opening_is_not():
     """The mixed rounds are exact indifference points, but the opening is strict."""
     auction, sigma = target("zero")
-    at = auction.info_index
     for round_index in (1, 3):  # sigma_1 and sigma_3 are interior
-        assert abs(A.counterfactual_gain(auction, sigma, at[(0, auction.states[round_index], 1)])) < 1e-12, round_index
-    assert A.counterfactual_gain(auction, sigma, at[(0, auction.root(), 1)]) > 1e-6  # H strictly stays at p = 0
-    assert A.counterfactual_gain(auction, sigma, at[(0, auction.root(), 0)]) < -1e-6  # L strictly exits at p = 0
+        assert abs(gain_at(auction, sigma, auction.states[round_index], 1)) < 1e-12, round_index
+    assert gain_at(auction, sigma, auction.root(), 1) > 1e-6  # H strictly stays at p = 0
+    assert gain_at(auction, sigma, auction.root(), 0) < -1e-6  # L strictly exits at p = 0
 
 
 def test_opening_incentive_constraint_binds_at_one_minus_q_over_two():
@@ -92,8 +97,7 @@ def test_opening_incentive_constraint_binds_at_one_minus_q_over_two():
     for q in (0.25, 0.5, 0.75):
         for c in (G.ic_bound(q) - 0.1, G.ic_bound(q) + 0.1):
             auction, sigma = target("least_cost", c=c, q=q)
-            position = auction.info_index[(0, auction.root(), 1)]
-            gain = A.counterfactual_gain(auction, sigma, position) / q  # the opening's reach is the prior on H
+            gain = gain_at(auction, sigma, auction.root(), 1) / q  # the opening's reach is the prior on H
             assert abs(gain - (G.ic_bound(q) - c)) < TIGHT
             assert (gain > 0) == (c < G.ic_bound(q))
 

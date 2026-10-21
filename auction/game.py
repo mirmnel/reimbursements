@@ -318,11 +318,6 @@ class Auction:
         means = bucket_means(index, len(self.orbits), self.paid_by_state)
         return means if np.max(np.abs(self.paid_by_state - means[index])) <= COARSENING_TOLERANCE else None
 
-    @cached_property
-    def orbit_measurable(self) -> bool:
-        """Whether the policy pays the same at every history of an orbit, which the reduction needs."""
-        return self.orbit_view is not None
-
     def release_history_tables(self) -> None:
         """Drop the per-history tables, which rebuild on demand and cost half a gigabyte at six bidders."""
         for table in ("branch_tables", "gather"):
