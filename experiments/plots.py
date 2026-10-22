@@ -13,13 +13,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch, Rectangle
 
 from auction.game import (
     REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, closed_form_revenue, payoff_scale, region,
 )
 from auction.mccfr import REVENUE_BAR, STAY_BAR, Verdict, closed_forms, stay_schedule
-from auction.exact import CERTIFIED, utility_loss
+from auction.exact import CERTIFIED
 from experiments.scale import COUNTS, ROUNDS
 from experiments.two_bidder import CELLS, RESULTS, SIGNAL_PROBABILITIES, margin
 
@@ -119,113 +118,8 @@ def schedule_panel(axis: plt.Axes, runs: List[Dict[str, object]]) -> None:
     axis.legend(handles=handles, loc="upper left", fontsize=7.5, frameon=False, labelcolor=INK)
 
 
-def by_cost_panels(runs: List[Dict[str, object]]) -> None:
-    """Closed-form revenue curves in c at each q, with every seed's learned revenue laid over them."""
-    probabilities = sorted({row["q"] for row in runs})
-    fig, axes = plt.subplots(1, len(probabilities), figsize=(7.0, 2.8), sharey=False, constrained_layout=True)
-    for axis, q in zip(axes, probabilities):
-        span = np.linspace(0.0, span_of(q), 200)
-        bound = region(q)
-        for rule in VALIDATED_POLICIES:
-            color = RULE_COLOR[rule]
-            curve = np.array([closed_form_revenue(rule, c, q) for c in span])
-            cells = [Auction(q=q, c=c, reimbursement_policy=rule) for c in span]
-            held = np.array([utility_loss(auction, closed_forms(auction)[0]) <= CERTIFIED for auction in cells])
-            axis.plot(span, np.where(held, curve, np.nan), color=color, linewidth=2)
-            axis.plot(span, np.where(held, np.nan, curve), color=color, linewidth=1.2, linestyle=(0, (2, 2)))
-            at = [row for row in runs if row["reimbursement_policy"] == rule and row["q"] == q]
-            axis.scatter([row["c"] for row in at], [row["Pi"] for row in at], s=16, color=color,
-                         edgecolors="white", linewidths=0.6, zorder=3)
-        axis.axvline(bound, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
-        axis.text(bound, 0.88, " IC", transform=axis.get_xaxis_transform(), fontsize=8, color=INK, va="top")
-        axis.set_xlim(0.0, span[-1])
-        chrome(axis, f"$q={q:g}$", "cost $c$", r"seller net revenue $\Pi$" if axis is axes[0] else "")
-    handles = [Line2D([], [], color=RULE_COLOR[rule], linewidth=2, label=RULE_LABEL[rule]) for rule in VALIDATED_POLICIES]
-    handles += [
-        Line2D([], [], color=MUTED, linewidth=0, marker="o", label="MCCFR seed"),
-        Line2D([], [], color=MUTED, linewidth=1.2, linestyle=(0, (2, 2)), label="no equilibrium"),
-    ]
-    fig.legend(handles=handles, loc="outside lower center", ncol=6, fontsize=7.5, frameon=False, labelcolor=INK)
-    save(fig, "validation_by_cost")
-
-
 # Per-placement panels show only these, since neighbouring placements crowd each other.
 PLACEMENT_COLOR = {"inside": "#6da7ec", "bound": "#2a78d6", "outside": "#104281"}
-
-
-VERDICT_STYLE = {  # neutral steps, so verdicts never borrow a rule's hue
-    Verdict.DERIVED: {"facecolor": "#3d3d3a", "hatch": None},
-    Verdict.DIFFERENT: {"facecolor": "#9a9993", "hatch": None},
-    Verdict.UNSOLVED: {"facecolor": "#ffffff", "hatch": "////"},
-}
-
-
-def region_panels(runs: List[Dict[str, object]]) -> None:
-    """Each rule's verdict counts placed on the (c, q) plane, against the bounds the theory draws there."""
-    fig, axes = plt.subplots(1, len(VALIDATED_POLICIES), figsize=(7.0, 2.9), sharey=True, constrained_layout=True)
-    cells = sorted({(row["q"], row["c"]) for row in runs if row["placement"] in PLACEMENT_COLOR})
-    costs, probabilities = np.linspace(0.0, 0.25, 200), np.linspace(0.6, 1.0, 200)
-    width, height = 0.022, 0.025
-    for axis, rule in zip(axes, VALIDATED_POLICIES):
-        inside = np.array([region(q) for q in probabilities])
-        axis.fill_betweenx(probabilities, 0.0, inside, color=GRID, alpha=0.7, linewidth=0, zorder=0)
-        axis.plot(costs, 1 - 2 * costs, color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)))
-        for q, c in cells:
-            at = [row for row in runs if row["reimbursement_policy"] == rule and row["q"] == q and row["c"] == c]
-            left = c - width / 2
-            for verdict in Verdict:
-                share = sum(row["verdict"] == verdict.value for row in at) / len(at)
-                if share:
-                    axis.add_patch(Rectangle((left, q - height / 2), width * share, height, edgecolor=MUTED,
-                                             linewidth=0.5, zorder=3, **VERDICT_STYLE[verdict]))
-                left += width * share
-            counts = "/".join(str(sum(row["verdict"] == verdict.value for row in at)) for verdict in Verdict)
-            # Alternate labels above and below so neighbours along one q never collide.
-            above = sorted(cost for row_q, cost in cells if row_q == q).index(c) % 2
-            offset = height / 2 + 0.008
-            axis.text(c, q + offset if above else q - offset, counts, ha="center", va="bottom" if above else "top",
-                      fontsize=5.5, color=INK)
-        axis.set_xlim(0.0, 0.25)
-        axis.set_ylim(0.6, 1.0)
-        chrome(axis, RULE_LABEL[rule], "cost $c$", "signal probability $q$" if axis is axes[0] else "")
-    axes[0].text(0.006, 0.62, "region", fontsize=7.5, color=MUTED)
-    handles = [Patch(edgecolor=MUTED, linewidth=0.5, label=verdict.value, **VERDICT_STYLE[verdict]) for verdict in Verdict]
-    handles.append(Line2D([], [], color=MUTED, linewidth=0.8, linestyle=(0, (1, 2)), label="IC bound $(1-q)/2$"))
-    fig.legend(handles=handles, loc="outside lower center", ncol=4, fontsize=7.5, frameon=False, labelcolor=INK)
-    save(fig, "validation_region")
-
-
-HIGH_PATH = ("open_high", "sigma1", "sigma2", "sigma3")
-
-
-def schedule_panels(runs: List[Dict[str, object]]) -> None:
-    """A high-signal bidder's stay probability by round under no reimbursement, learned against closed form."""
-    zero = [row for row in runs if row["reimbursement_policy"] == "zero"]
-    probabilities = sorted({row["q"] for row in zero})
-    fig, axes = plt.subplots(1, len(probabilities), figsize=(7.0, 2.6), sharey=True, constrained_layout=True)
-    rounds = np.arange(len(HIGH_PATH))
-    jitter = np.random.default_rng(0)
-    for axis, q in zip(axes, probabilities):
-        for placement, color in PLACEMENT_COLOR.items():
-            at = [row for row in zero if row["q"] == q and row["placement"] == placement]
-            if not at:
-                continue
-            target = theory_schedule(q, at[0]["c"])
-            axis.plot(rounds, [target[name] for name in HIGH_PATH], color=color, linewidth=1.2,
-                      linestyle=(0, (4, 2)), marker="o", markersize=5, markerfacecolor="white")
-            for row in at:
-                axis.scatter(rounds + jitter.uniform(-0.08, 0.08, rounds.size), [row[name] for name in HIGH_PATH],
-                             s=9, color=color, alpha=0.7, linewidths=0, zorder=3)
-        axis.set_xticks(rounds, ["open", r"$\sigma_1$", r"$\sigma_2$", r"$\sigma_3$"])
-        axis.set_ylim(0.25, 1.04)
-        chrome(axis, f"$q={q:g}$", "round", "stay probability, high signal" if axis is axes[0] else "")
-    handles = [Line2D([], [], color=color, linewidth=0, marker="s", label=placement) for placement, color in PLACEMENT_COLOR.items()]
-    handles += [
-        Line2D([], [], color=MUTED, linewidth=1.2, linestyle=(0, (4, 2)), marker="o", markerfacecolor="white", label="closed form"),
-        Line2D([], [], color=MUTED, linewidth=0, marker="o", markersize=4, label="MCCFR seed"),
-    ]
-    fig.legend(handles=handles, loc="outside lower center", ncol=5, fontsize=7.5, frameon=False, labelcolor=INK)
-    save(fig, "validation_schedule")
 
 
 def trace_panels() -> None:
@@ -408,33 +302,18 @@ def recovery_figure() -> None:
 def rule_figure() -> None:
     """The minimum-cost rule's reimbursement by round as a share of the cost, one line per bidder count."""
     schedule = tuple(f"r_t{t}" for t in range(ROUNDS))
-    rows = read("scale_rules.csv", ("n", "c", "bill", "full_bill", *schedule))
+    rows = read("scale_rules.csv", ("n", "c", *schedule))
     rounds = np.arange(ROUNDS)
-    fig, (left, right) = plt.subplots(1, 2, figsize=(7.0, 2.7), constrained_layout=True,
-                                      gridspec_kw={"width_ratios": (3, 2)})
+    fig, axis = plt.subplots(figsize=(4.2, 2.7), constrained_layout=True)
     for row in rows:
         n = int(row["n"])
-        left.plot(rounds, [row[name] / row["c"] for name in schedule], color=N_COLOR[n], linewidth=1.6,
+        axis.plot(rounds, [row[name] / row["c"] for name in schedule], color=N_COLOR[n], linewidth=1.6,
                   marker="o", markersize=4, label=f"$n={n}$")
-    left.axhline(1.0, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-    left.set_xticks(rounds)
-    left.set_ylim(-0.03, 1.08)
-    chrome(left, "A. Reimbursement by round", "round $t$", "$r_t / c$")
-    left.legend(loc="lower right", fontsize=7.5, frameon=False, labelcolor=INK)
-
-    counts = [int(row["n"]) for row in rows]
-    positions = np.arange(len(rows))
-    right.bar(positions, [row["full_bill"] for row in rows], width=0.6, color=GRID, edgecolor=MUTED,
-              linewidth=0.5, label="$r = c$")
-    right.bar(positions, [row["bill"] for row in rows], width=0.36, color=[N_COLOR[n] for n in counts],
-              label="minimum-cost rule")
-    for x, row in zip(positions, rows):
-        right.text(x, row["full_bill"], f"−{1 - row['bill'] / row['full_bill']:.0%}", ha="center", va="bottom",
-                   fontsize=7.5, color=INK)
-    right.set_xticks(positions, [str(n) for n in counts])
-    right.margins(y=0.12)
-    chrome(right, "B. Expected reimbursement bill", "bidders $n$", "bill")
-    right.legend(loc="upper left", fontsize=7.5, frameon=False, labelcolor=INK)
+    axis.axhline(1.0, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
+    axis.set_xticks(rounds)
+    axis.set_ylim(-0.03, 1.08)
+    chrome(axis, "Reimbursement by round", "round $t$", "$r_t / c$")
+    axis.legend(loc="lower right", fontsize=7.5, frameon=False, labelcolor=INK)
     save(fig, "scale_rules")
 
 
@@ -445,9 +324,6 @@ def validation_figure() -> None:
     revenue_panel(left, runs)
     schedule_panel(right, runs)
     save(fig, "validation")
-    by_cost_panels(runs)
-    region_panels(runs)
-    schedule_panels(runs)
     trace_panels()
 
 

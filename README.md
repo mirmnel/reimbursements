@@ -37,14 +37,3 @@ beyond about seven bidders. `tests/test_scale.py` checks that the two paths agre
 by construction, which is how the two-bidder closed forms (stated within symmetric profiles) are tested.
 Experiment 2 also runs an unrestricted arm at three and four bidders. At six its profiles are too large to walk,
 so that arm stops at four.
-
-## Units
-
-The common value is the sum of the signals. The two-bidder example uses a tick of one half and a default cost of
-0.05. At `n` bidders, `experiments/scale.py` stretches the cost and every tolerance by `game.payoff_scale(n) = n / 2`, so each
-bidder count is held to the same bars relative to the prize.
-
-## Where the method comes from
-
-The utility-loss diagnostic follows Thoma et al 2023. We compute the best response exactly by a backward sweep,
-where they learn it.
