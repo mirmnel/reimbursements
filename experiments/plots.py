@@ -14,19 +14,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from auction.game import (
-    REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, closed_form_revenue, payoff_scale, region,
-)
+from auction.game import REIMBURSEMENT_POLICIES, VALIDATED_POLICIES, Auction, closed_form_revenue, region
 from auction.mccfr import REVENUE_BAR, STAY_BAR, Verdict, closed_forms, stay_schedule
 from auction.exact import CERTIFIED
-from experiments.scale import COUNTS, ROUNDS
+from experiments.scale import COUNTS, claims
 from experiments.two_bidder import CELLS, RESULTS, SIGNAL_PROBABILITIES, margin
 
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 CORNER_COLOR = "#9a9993"  # the unnamed corners share one recessive grey
-RULE_COLOR = {"zero": "#2a78d6", "full": "#eb6834", "least_cost": "#1baf7a", "backloaded": "#c2185b"}
+RULE_COLOR = {"zero": "#2a78d6", "full": "#eb6834", "war_all": "#1baf7a", "backloaded": "#c2185b"}
 RULE_COLOR |= {rule: CORNER_COLOR for rule in REIMBURSEMENT_POLICIES if rule not in RULE_COLOR}
-RULE_LABEL = {"zero": "$r=0$", "full": "$r=c$", "least_cost": "$r^*$", "backloaded": "back-loaded"}
+RULE_LABEL = {"zero": "$r=0$", "full": "$r=c$", "war_all": "$(0,c,c,c)$", "backloaded": "back-loaded"}
 Q_COLOR = {0.7: "#6da7ec", 0.75: "#2a78d6", 0.9: "#104281"}
 SCHEDULE_MARKER = {"open_high": "^", "open_low": "v", "sigma1": "o", "sigma2": "s", "sigma3": "D"}
 SCHEDULE_LABEL = {
@@ -93,9 +91,9 @@ def revenue_panel(axis: plt.Axes, runs: List[Dict[str, object]]) -> None:
     handles = [Line2D([], [], marker="o", linestyle="", color=RULE_COLOR[rule], label=RULE_LABEL[rule])
                for rule in VALIDATED_POLICIES]
     handles += [
-        Line2D([], [], marker="o", linestyle="", color=MUTED, label="derived"),
-        Line2D([], [], marker="o", linestyle="", markerfacecolor="white", markeredgecolor=MUTED, label="different"),
-        Line2D([], [], marker="x", linestyle="", color=MUTED, label="unsolved"),
+        Line2D([], [], marker="o", linestyle="", color=MUTED, label="matches theory"),
+        Line2D([], [], marker="o", linestyle="", markerfacecolor="white", markeredgecolor=MUTED, label="different equilibrium"),
+        Line2D([], [], marker="x", linestyle="", color=MUTED, label="no equilibrium"),
     ]
     axis.legend(handles=handles, loc="upper left", fontsize=7.5, frameon=False, labelcolor=INK)
 
@@ -248,73 +246,49 @@ def gap_figure() -> None:
     save(fig, "robustness_gaps")
 
 
-ARM_COLOR = {True: "#3d3d3a", False: "#9a9993"}  # symmetry-restricted, unrestricted
-ARM_LABEL = {True: "symmetry-restricted", False: "unrestricted"}
-N_COLOR = {3: "#6da7ec", 4: "#2a78d6", 6: "#104281"}
+N_COLOR = {2: "#6da7ec", 4: "#2a78d6", 6: "#104281"}
+WAR_MARKER = {"open_high": "^", "open_low": "v", "war_t1": "o", "war_t2": "s", "war_t3": "D"}
+WAR_LABEL = {"open_high": "open, high", "open_low": "open, low",
+             "war_t1": "war, $a/2$", "war_t2": "war, $a$", "war_t3": "war, $3a/2$"}
+CLAIM_LABEL = {"trigger_minus_none": "Trigger $-$ None", "preserve_minus_full": "Preserve $-$ Full",
+               "preserve_minus_full_high": "Preserve $-$ Full, high $c$"}
+CLAIM_COLOR = {"trigger_minus_none": "#c2185b", "preserve_minus_full": "#1baf7a",
+               "preserve_minus_full_high": "#0d6b4a"}
 
 
-def scatter(axis: plt.Axes, rows: list, value) -> None:
-    """One dot per seed at its bidder count, the two arms dodged apart."""
-    jitter = np.random.default_rng(0)
-    for index, n in enumerate(COUNTS):
-        for restricted, shift in ((True, -0.17), (False, 0.17)):
-            color = ARM_COLOR[restricted]
-            for row in rows:
-                if row["n"] != n or (row["symmetry_restricted"] == "True") != restricted:
-                    continue
-                x = index + shift + jitter.uniform(-0.07, 0.07)
-                axis.scatter(x, value(row), s=16, color=color, linewidths=0.9, zorder=3)
-    axis.set_xticks(range(len(COUNTS)), [str(n) for n in COUNTS])
-    axis.set_xlim(-0.6, len(COUNTS) - 0.4)
-
-
-def recovery_figure() -> None:
-    """Per-seed utility loss, revenue gap and distance to the reference, each on the two-bidder scale."""
-    rows = read("scale.csv", ("n", "utility_loss", "Pi", "Pi_target", "arrival_weighted_distance"))
+def scale_figure() -> None:
+    """Learned stay probabilities against theory, and learned revenue differences against the formulas."""
+    rows = read("scale.csv", ("n", "Pi", *WAR_MARKER, *(f"war_t{t}_theory" for t in (1, 2, 3))))
+    fig, (stays, revenue) = plt.subplots(1, 2, figsize=(7.0, 3.4), constrained_layout=True)
+    theory = {"open_high": lambda row: 1.0, "open_low": lambda row: 0.0}
+    theory |= {f"war_t{t}": (lambda row, t=t: row[f"war_t{t}_theory"]) for t in (1, 2, 3)}
     for row in rows:
-        row["n"] = int(row["n"])
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.8), constrained_layout=True)
+        for name, marker in WAR_MARKER.items():
+            stays.scatter(theory[name](row), row[name], s=20, marker=marker, color=N_COLOR[int(row["n"])],
+                          edgecolors="white", linewidths=0.5, alpha=0.8)
+    stays.set_xlim(-0.05, 1.05)
+    style(stays, "A. Stay probabilities", "theory", "MCCFR", STAY_BAR)
+    handles = [Line2D([], [], marker="s", linestyle="", color=color, label=f"$n={n}$") for n, color in N_COLOR.items()]
+    handles += [Line2D([], [], marker=marker, linestyle="", color=MUTED, label=WAR_LABEL[name])
+                for name, marker in WAR_MARKER.items()]
+    stays.legend(handles=handles, loc="upper left", fontsize=7, frameon=False, labelcolor=INK)
 
-    loss, gap, distance = axes
-    loss.axhline(CERTIFIED, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-    loss.text(-0.55, CERTIFIED, r"$\varepsilon$", fontsize=8, color=INK, va="bottom")
-    scatter(loss, rows, lambda row: row["utility_loss"] / payoff_scale(row["n"]))
-    chrome(loss, "A. Utility loss", "bidders $n$", r"loss $/\ (n/2)$")
-
-    gap.axhspan(-REVENUE_BAR, REVENUE_BAR, color=GRID, alpha=0.6, linewidth=0, zorder=0)
-    gap.axhline(0.0, color=INK, linewidth=0.8)
-    scatter(gap, rows, lambda row: (row["Pi"] - row["Pi_target"]) / payoff_scale(row["n"]))
-    chrome(gap, "B. Net revenue gap", "bidders $n$", r"$(\Pi_{\mathrm{MCCFR}} - \Pi_{\mathrm{ref}})\ /\ (n/2)$")
-
-    distance.axhline(STAY_BAR, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-    distance.text(-0.55, STAY_BAR, " stay bar", fontsize=7, color=MUTED, va="bottom")
-    scatter(distance, rows, lambda row: row["arrival_weighted_distance"])
-    distance.set_ylim(bottom=0.0)
-    chrome(distance, "C. Distance to ref.", "bidders $n$", "worst bidder's weighted distance")
-
-    handles = [Line2D([], [], color=ARM_COLOR[arm], linewidth=0, marker="o", label=ARM_LABEL[arm])
-               for arm in (True, False)]
-    handles.append(Line2D([], [], color=GRID, linewidth=6, label=r"$\pm$ revenue tolerance"))
-    fig.legend(handles=handles, loc="outside lower center", ncol=3, fontsize=7.5, frameon=False, labelcolor=INK)
+    found = claims(rows)
+    for offset, name in zip((-0.15, 0.0, 0.15), CLAIM_LABEL):
+        at = [claim for claim in found if claim["claim"] == name]
+        x = [COUNTS.index(claim["n"]) + offset for claim in at]
+        revenue.scatter(x, [claim["predicted"] for claim in at], s=60, marker="_", color=CLAIM_COLOR[name], zorder=3)
+        revenue.scatter(x, [claim["learned"] for claim in at], s=18, color=CLAIM_COLOR[name], zorder=4,
+                        label=CLAIM_LABEL[name])
+    revenue.axhline(0.0, color=INK, linewidth=0.8)
+    revenue.set_xticks(range(len(COUNTS)), [str(n) for n in COUNTS])
+    revenue.set_xlim(-0.6, len(COUNTS) - 0.4)
+    chrome(revenue, "B. Revenue differences", "bidders $n$", "difference in $\\Pi$")
+    handles = [Line2D([], [], marker="o", linestyle="", color=CLAIM_COLOR[name], label=label)
+               for name, label in CLAIM_LABEL.items()]
+    handles.append(Line2D([], [], marker="_", markersize=9, linestyle="", color=MUTED, label="formula"))
+    revenue.legend(handles=handles, loc="upper left", fontsize=7, frameon=False, labelcolor=INK)
     save(fig, "scale")
-
-
-def rule_figure() -> None:
-    """The minimum-cost rule's reimbursement by round as a share of the cost, one line per bidder count."""
-    schedule = tuple(f"r_t{t}" for t in range(ROUNDS))
-    rows = read("scale_rules.csv", ("n", "c", *schedule))
-    rounds = np.arange(ROUNDS)
-    fig, axis = plt.subplots(figsize=(4.2, 2.7), constrained_layout=True)
-    for row in rows:
-        n = int(row["n"])
-        axis.plot(rounds, [row[name] / row["c"] for name in schedule], color=N_COLOR[n], linewidth=1.6,
-                  marker="o", markersize=4, label=f"$n={n}$")
-    axis.axhline(1.0, color=MUTED, linewidth=0.8, linestyle=(0, (4, 2)))
-    axis.set_xticks(rounds)
-    axis.set_ylim(-0.03, 1.08)
-    chrome(axis, "Reimbursement by round", "round $t$", "$r_t / c$")
-    axis.legend(loc="lower right", fontsize=7.5, frameon=False, labelcolor=INK)
-    save(fig, "scale_rules")
 
 
 def validation_figure() -> None:
@@ -331,5 +305,4 @@ if __name__ == "__main__":
     validation_figure()
     ranking_figure()
     gap_figure()
-    recovery_figure()
-    rule_figure()
+    scale_figure()

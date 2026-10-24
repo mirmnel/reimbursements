@@ -30,7 +30,7 @@ def published(c, q):
     return {
         "zero": ((1, s1, 1, s3), q**2 * (0.5 * (1 - s1**2) + s1**2 * (1.5 + 0.5 * s3**2))),
         "full": ((1, 1, 1, 1), 2 * q**2 - c * (8 * q**2 + 2 * q * (1 - q))),
-        "least_cost": ((1, 1, 1, 1), 2 * q**2 * (1 - 3 * c)),
+        "war_all": ((1, 1, 1, 1), 2 * q**2 * (1 - 3 * c)),
         "backloaded": ((1, 1, 1 - 2 * c, 1), q**2 * (1 + (1 - 2 * c) ** 3)),
     }
 
@@ -47,11 +47,11 @@ def test_the_recursion_reproduces_every_published_closed_form():
                 assert abs(got - earned) < TIGHT, (name, c, q, got, earned)
 
 
-def test_least_cost_beats_full_by_exactly_two_q_c():
-    """The closed-form gap between the least-cost and full policies holds at every cost and probability."""
+def test_war_all_beats_full_by_exactly_two_q_c():
+    """The closed-form gap between the war-all and full policies holds at every cost and probability."""
     for q in (0.25, 0.5, 0.75):
         for c in (0.01, 0.05, 0.15):
-            assert abs(G.closed_form_revenue("least_cost", c, q) - G.closed_form_revenue("full", c, q) - 2 * q * c) < 1e-12
+            assert abs(G.closed_form_revenue("war_all", c, q) - G.closed_form_revenue("full", c, q) - 2 * q * c) < 1e-12
 
 
 # --- the exact solver reproduces the paper, without being told the answer ---
@@ -93,10 +93,10 @@ def test_endgame_is_knife_edge_and_the_opening_is_not():
 
 
 def test_opening_incentive_constraint_binds_at_one_minus_q_over_two():
-    """Under the least-cost policy the opening gain is the incentive bound less the cost."""
+    """Under the war-all policy the opening gain is the incentive bound less the cost."""
     for q in (0.25, 0.5, 0.75):
         for c in (G.ic_bound(q) - 0.1, G.ic_bound(q) + 0.1):
-            auction, sigma = target("least_cost", c=c, q=q)
+            auction, sigma = target("war_all", c=c, q=q)
             gain = gain_at(auction, sigma, auction.root(), 1) / q  # the opening's reach is the prior on H
             assert abs(gain - (G.ic_bound(q) - c)) < TIGHT
             assert (gain > 0) == (c < G.ic_bound(q))
@@ -110,11 +110,11 @@ def test_the_backloaded_target_is_an_equilibrium_earning_the_published_revenue()
 
 
 def test_the_backloaded_gaps_match_the_published_polynomials():
-    """The gaps to least-cost and to no reimbursement are the theorem's two polynomials in kappa."""
+    """The gaps to war-all and to no reimbursement are the theorem's two polynomials in kappa."""
     for q in (0.6, 0.75, 0.9):
         for c in (0.01, 0.03, G.ic_bound(q)):
             backloaded = G.closed_form_revenue("backloaded", c, q)
-            assert abs(backloaded - G.closed_form_revenue("least_cost", c, q) - 4 * q**2 * c**2 * (3 - 2 * c)) < TIGHT, (c, q)
+            assert abs(backloaded - G.closed_form_revenue("war_all", c, q) - 4 * q**2 * c**2 * (3 - 2 * c)) < TIGHT, (c, q)
             gap = 2 * q**2 * c / 9 * (9 - 42 * c + 92 * c**2 - 64 * c**3)
             assert abs(backloaded - G.closed_form_revenue("zero", c, q) - gap) < TIGHT, (c, q)
 

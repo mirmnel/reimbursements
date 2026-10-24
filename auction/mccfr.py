@@ -20,7 +20,7 @@ TRACE_EVERY = 20
 
 BUDGET = 100_000  # iterations every run gets
 
-STAY_BAR = 0.06  # how far an on-path stay probability may sit from the closed form.
+STAY_BAR = 0.05  # how far an on-path stay probability may sit from the closed form.
 REVENUE_BAR = 0.02  # how far a match's seller net revenue may sit from theory, checked after the verdict
 
 

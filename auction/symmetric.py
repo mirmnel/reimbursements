@@ -151,11 +151,8 @@ def tagged_payoff(
     return float(np.sum(weights * (const[0, high] + coefficient[0, high] * (high + signal))))
 
 
-def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
-    """Exact expectations under a symmetric profile, on exit-round orbits rather than histories."""
-    stay = anonymise(auction, sigma)
-    paid = auction.orbit_view if refunds is None else refunds
-    # Expected price and reimbursement from each orbit onward.
+def seller_tables(auction: Auction, stay: np.ndarray, paid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Expected price and reimbursement from each orbit onward, per count of high bidders still in."""
     shape = (len(auction.orbits), auction.n + 1)
     price, payout = np.zeros(shape), np.zeros(shape)
     for orbit in reversed(range(len(auction.orbits))):
@@ -173,6 +170,14 @@ def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] =
             payout[orbit, high] = np.sum(
                 thin * (stayers * refund + np.where(carries, payout[safe, survivors], 0.0))
             )
+    return price, payout
+
+
+def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
+    """Exact expectations under a symmetric profile, on exit-round orbits rather than histories."""
+    stay = anonymise(auction, sigma)
+    paid = auction.orbit_view if refunds is None else refunds
+    price, payout = seller_tables(auction, stay, paid)
     n = auction.n
     high = np.arange(n + 1)
     seller = [float(np.sum(auction.signal_counts * table[0, high])) for table in (price, payout)]

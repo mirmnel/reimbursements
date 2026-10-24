@@ -29,6 +29,7 @@ SignalPrior = Callable[[np.ndarray], np.ndarray]  # signal profiles -> probabili
 
 PRIOR_TOLERANCE = 1e-12  # how far a prior may sit from a product of its marginals and still factorise
 COARSENING_TOLERANCE = 1e-12  # how far a policy may vary inside an orbit or a round and still coarsen onto it
+INDIFFERENT = 1e-12  # how far below zero a stay's gain may sit and still count as indifference
 
 
 def independent(q: float) -> SignalPrior:
@@ -96,7 +97,7 @@ def flat(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
     return schedule([fraction * c] * rounds)
 
 
-def least_cost(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
+def war_all(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPolicy:
     """Reimburse in every round but the opening one, where separation has to be paid for."""
     return schedule([0.0] + [fraction * c] * (rounds - 1))
 
@@ -104,6 +105,21 @@ def least_cost(c: float, rounds: int, fraction: float = 1.0) -> ReimbursementPol
 def backloaded(c: float, rounds: int) -> ReimbursementPolicy:
     """Reimburse the last decision round alone."""
     return schedule([0.0] * (rounds - 1) + [c])
+
+
+def opening_margin(n: int, q: float) -> float:
+    """What a high type gains at the opening by staying when bidding is free, the paper's w0."""
+    return (1 - q) ** (n - 1) * (1 - 1 / n)
+
+
+def preserve(c: float, rounds: int, n: int, q: float) -> ReimbursementPolicy:
+    """The cheapest rule keeping the frictionless sorting strategy an equilibrium."""
+    return schedule([max(0.0, c - opening_margin(n, q))] + [c] * (rounds - 1))
+
+
+def trigger(c: float, n: int) -> ReimbursementPolicy:
+    """Pay a stay at 3a/2 only in a war that two bidders entered from the opening."""
+    return lambda state: c if state.round == 3 and state.exits.count(0) == n - 2 else 0.0
 
 
 def war(pattern: str) -> Callable[[float, int], ReimbursementPolicy]:
@@ -118,13 +134,13 @@ def war(pattern: str) -> Callable[[float, int], ReimbursementPolicy]:
 PUBLISHED_REIMBURSEMENTS = {
     "zero": lambda c, rounds: flat(c, rounds, 0.0),
     "full": flat,
-    "least_cost": least_cost,
+    "war_all": war_all,
     "backloaded": backloaded,
     # The other corners of the price-only class, which the back-loaded policy has to beat.
     **{f"war_{pattern}": war(pattern) for pattern in ("c00", "0c0", "cc0", "c0c", "0cc")},
 }
 REIMBURSEMENT_POLICIES = tuple(PUBLISHED_REIMBURSEMENTS)
-VALIDATED_POLICIES = ("zero", "full", "least_cost", "backloaded")  # those the paper prints closed forms for
+VALIDATED_POLICIES = ("zero", "full", "war_all", "backloaded")  # those the paper prints closed forms for
 
 
 def states(n: int, rounds: int) -> List[State]:
@@ -149,7 +165,7 @@ class Auction:
 
     q: float = 0.5  # Pr(s_i = 1)
     c: float = 0.05  # participation cost per stay
-    reimbursement_policy: Union[str, ReimbursementPolicy] = "least_cost"  # a schedule, or a published name
+    reimbursement_policy: Union[str, ReimbursementPolicy] = "war_all"  # a schedule, or a published name
     n: int = 2
     rounds: int = 4  # decision rounds
     delta: float = 0.5  # tick size
@@ -401,6 +417,44 @@ def closed_form(auction: Auction) -> Tuple[Strategy, float]:
         stays[t] = stay
     strategy: Strategy = lambda state, signal: stays[state.round] if signal == 1 else 0.0
     return strategy, auction.q**2 * revenue - 2 * auction.q * paid[0]
+
+
+def sorting_profile(auction: Auction) -> np.ndarray:
+    """The symmetric sorting equilibrium at any n: sorting at the opening, then each war solved backward."""
+    # Survivors believe the value is the opening stayers' count, and mix where indifferent as in fin:rent-bound.
+    paid, onward = auction.orbit_view, auction.onward_orbit
+    worth = np.zeros(len(auction.orbits))
+    table = np.zeros((len(auction.orbits), 2))
+    for orbit in reversed(range(len(auction.orbits))):
+        round_index, departed = auction.orbits[orbit]
+        if round_index == 0:
+            table[orbit, 1] = 1.0
+            continue
+        active = auction.n - len(departed)
+        surplus = auction.n - departed.count(0) - auction.price(round_index)
+        rivals = np.arange(active)  # how many of the other active bidders stay
+        leaving = active - 1 - rivals
+        carries = (onward[orbit][leaving] >= 0) & (rivals >= 1)
+        capped = surplus + auction.price(round_index) - auction.price(auction.rounds)
+        later = np.where(carries, worth[onward[orbit][leaving]], capped / (rivals + 1))
+        later[0] = surplus
+
+        def gain(stay: float) -> float:
+            odds = np.array([math.comb(active - 1, k) * stay**k * (1 - stay) ** (active - 1 - k) for k in rivals])
+            return odds @ later - (auction.c - paid[orbit]) - odds[0] * surplus / active
+
+        if gain(1.0) >= -INDIFFERENT:
+            stay = 1.0
+        elif gain(0.0) <= 0.0:
+            stay = 0.0
+        else:
+            low, high = 0.0, 1.0
+            for _ in range(100):
+                low, high = ((low + high) / 2, high) if gain((low + high) / 2) > 0 else (low, (low + high) / 2)
+            stay = low
+        table[orbit, 1] = stay
+        worth[orbit] = (1 - stay) ** (active - 1) * surplus / active + (gain(stay) if stay == 1.0 else 0.0)
+    return table.ravel()[auction.orbit_index]
 
 
 def closed_form_revenue(rule: str, c: float, q: float) -> float:

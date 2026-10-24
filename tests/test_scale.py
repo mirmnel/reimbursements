@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -98,46 +97,89 @@ def test_an_asymmetric_profile_still_routes_to_the_per_history_path():
     assert abs(outcome.payoff[1]) < TIGHT
 
 
-# --- the scale experiment, without running it -------------------------------
+# --- the theory the scale experiment scores against --------------------------
+
+AUCTIONS = {}
 
 
-def test_the_experiment_runs_the_three_bidder_counts_the_paper_names():
-    """Three, four and six, with correlated signals and a clock finer than the example's."""
+def auction_at(n, policy):
+    """``scale.auction_at``, built once per test session since six bidders take seconds."""
+    if (n, policy) not in AUCTIONS:
+        AUCTIONS[(n, policy)] = scale.auction_at(n, policy)
+    return AUCTIONS[(n, policy)]
+
+
+POLICIES = ("zero", "trigger", "preserve", "full", "frictionless", "preserve_high", "full_high")
+
+
+def test_the_sorting_profile_reproduces_the_two_bidder_closed_forms():
+    """At two bidders the general backward solution is the example's closed form under every validated policy."""
+    for q in (0.6, 0.75):
+        for c in (0.01, 0.1):
+            for name in G.VALIDATED_POLICIES:
+                auction = G.Auction(q=q, c=c, reimbursement_policy=name)
+                closed = G.profile(auction, G.closed_form(auction)[0])
+                assert np.max(np.abs(G.sorting_profile(auction) - closed)) < TIGHT, (name, q, c)
+
+
+def test_theory_is_an_equilibrium_under_every_policy_at_every_count():
+    """Each policy's sorting profile has no profitable deviation, sorting at the opening included."""
     for n in scale.COUNTS:
-        auction = scale.auction_at(n, "least_cost")
-        # A finer clock over the same range of common values, and a cost stretched with them.
-        assert abs(auction.rounds * auction.delta - n) < TIGHT, n
-        assert abs(auction.c - scale.C * n / 2) < TIGHT, n
-        assert not auction.independent_signals and auction.exchangeable_signals, n
+        for policy in POLICIES:
+            auction = auction_at(n, policy)
+            assert A.utility_loss(auction, G.sorting_profile(auction)) < 1e-9, (n, policy)
 
 
-def test_the_reduction_covers_the_restricted_arm_at_every_count():
-    """Every symmetric profile is read on orbits, so the restricted arm is exact even at six bidders."""
+def test_the_costs_sit_where_the_theorems_apply():
+    """The main cost is under fin:trigger's bound, and the high cost leaves Preserve a positive opening payment."""
     for n in scale.COUNTS:
-        auction = scale.auction_at(n, "least_cost")
-        assert S.applies(auction, random_symmetric(auction, 7)), n
+        assert scale.KAPPA < min(0.25, G.opening_margin(n, scale.Q)), n
+        high = auction_at(n, "preserve_high")
+        assert abs(high.reimburses(high.root()) - scale.ABOVE_MARGIN) < TIGHT, n
+        assert auction_at(n, "preserve").reimburses(auction_at(n, "preserve").root()) == 0.0, n
 
 
-def test_the_unrestricted_arm_runs_only_where_its_tree_can_be_walked():
-    """Six bidders are past the enumeration bar, so the unrestricted arm stops at four."""
-    walked = {n: len(scale.auction_at(n, "least_cost").info_sets) <= scale.EXACT_INFO_SETS for n in scale.COUNTS}
-    assert walked == {3: True, 4: True, 6: False}, walked
+def revenue(n, policy, column=None):
+    """Exact seller net revenue of the policy's sorting profile, or its two-survivor part."""
+    auction = auction_at(n, policy)
+    sigma = G.sorting_profile(auction)
+    return scale.two_survivor_revenue(auction, sigma) if column else A.evaluate(auction, sigma).revenue
 
 
-def test_one_bidder_off_the_target_counts_as_fully_as_all_of_them():
-    """The distance is the worst bidder's, so the others matching cannot average one deviant away."""
-    auction = scale.auction_at(3, "full")
-    target = random_symmetric(auction, 4)
-    reference = scale.Reference(3, None, target, None, auction)
-    one = np.where([b == 0 for b, _, _ in auction.info_sets], 1.0 - target, target)
-    distance, solved_at = {}, scale.solved_at
-    try:
-        for name, profile in (("one", one), ("all", 1.0 - target)):
-            scale.solved_at = lambda *_, profile=profile: SimpleNamespace(profile=profile)
-            distance[name] = scale.recovery_row(reference, 0, True)["arrival_weighted_distance"]
-    finally:
-        scale.solved_at = solved_at
-    assert abs(distance["one"] - distance["all"]) < TIGHT, distance
+def test_trigger_gains_exactly_fin_revenue_gain_and_only_in_the_two_survivor_war():
+    """Trigger less None is the theorem's polynomial, and all of it comes from two-survivor wars."""
+    for n in scale.COUNTS:
+        gain = revenue(n, "trigger") - revenue(n, "zero")
+        war = revenue(n, "trigger", "war") - revenue(n, "zero", "war")
+        assert abs(gain - scale.trigger_gain(n)) < TIGHT, n
+        assert abs(war - gain) < TIGHT, n
+
+
+def test_preserve_saves_exactly_the_opening_payment_full_makes():
+    """Preserve less Full is n q min(c, w0) at both costs."""
+    for n in scale.COUNTS:
+        for suffix in ("", "_high"):
+            saving = revenue(n, "preserve" + suffix) - revenue(n, "full" + suffix)
+            assert abs(saving - scale.preserve_saving(n, scale.cost(n, "preserve" + suffix))) < TIGHT, (n, suffix)
+
+
+# --- running the experiment ------------------------------------------------
+
+
+def test_saved_seeds_are_not_run_again():
+    """A later call runs only seeds missing from the saved rows, in chunks."""
+    done = [{"n": 2, "policy": run, "seed": seed} for run in scale.RUNS for seed in (0, 1)]
+    jobs = scale.pending(done, (2,), range(5))
+    assert {(n, run) for n, run, _, _ in jobs} == {(2, run) for run in scale.RUNS}
+    assert all(seeds == (2, 3, 4) for _, _, seeds, _ in jobs), jobs
+
+
+def test_a_frictionless_run_is_scored_under_full_at_both_costs():
+    """One short run gives a row each for the frictionless game and for Full, with the same play."""
+    rows = scale.run_job((2, "frictionless", (0,), 2_000))
+    assert [row["policy"] for row in rows] == ["frictionless", "full", "full_high"]
+    assert len({row["open_high"] for row in rows}) == 1
+    assert all(row["verdict"] in {v.value for v in scale.Verdict} for row in rows)
 
 
 if __name__ == "__main__":
