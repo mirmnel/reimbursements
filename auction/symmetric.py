@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -35,19 +34,9 @@ def anonymise(auction: Auction, sigma: np.ndarray) -> np.ndarray:
 
 
 def applies(auction: Auction, sigma: np.ndarray) -> bool:
-    """Whether the reduction is valid here, which needs symmetry, an exchangeable prior and an orbit rule."""
+    """Whether the reduction is valid here, which needs symmetry and an orbit rule."""
     symmetric = np.max(np.abs(sigma - anonymise(auction, sigma).ravel()[auction.orbit_index])) <= TOLERANCE
-    return auction.exchangeable_signals and auction.orbit_view is not None and bool(symmetric)
-
-
-@lru_cache(maxsize=None)
-def _arrangements(n: int, departed: Tuple[int, ...]) -> float:
-    """How many ways the other bidders fill one orbit's exit rounds, a given bidder staying in."""
-    total, remaining = math.comb(n - 1, n - 1 - len(departed)), len(departed)
-    for count in Counter(departed).values():
-        total *= math.comb(remaining, count)
-        remaining -= count
-    return float(total)
+    return auction.orbit_view is not None and bool(symmetric)
 
 
 def _onward(auction: Auction, orbit: int, leaving: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -88,12 +77,9 @@ def empty_values(auction: Auction) -> Values:
     return np.zeros(shape), np.zeros(shape)
 
 
-def tagged_values(
-    auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int,
-    refunds: Optional[np.ndarray] = None,
-) -> Values:
+def tagged_values(auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int) -> Values:
     """A tagged bidder's payoff from each orbit, as a constant and a coefficient on the value."""
-    paid = auction.orbit_view if refunds is None else refunds
+    paid = auction.orbit_view
     values = empty_values(auction)
     for orbit in reversed(range(len(auction.orbits))):
         own = deviation[orbit, signal]
@@ -111,8 +97,6 @@ def tagged_reach(
     n, others = auction.n, auction.n - 1
     mass = np.zeros((len(auction.orbits), n))
     value_mass = np.zeros_like(mass)
-    # Joint in the tagged bidder's own signal and how many of the others drew high, which under a
-    # correlated prior is no longer its marginal times a binomial.
     start = auction.own_and_others[signal]
     mass[0, : others + 1] = start
     value_mass[0, : others + 1] = start * (np.arange(others + 1.0) + signal)
@@ -139,12 +123,9 @@ def signal_weight(auction: Auction, signal: int) -> float:
     return auction.high_probability if signal == 1 else 1.0 - auction.high_probability
 
 
-def tagged_payoff(
-    auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int,
-    refunds: Optional[np.ndarray] = None,
-) -> float:
+def tagged_payoff(auction: Auction, stay: np.ndarray, deviation: np.ndarray, signal: int) -> float:
     """Payoff of a tagged bidder holding ``signal`` and playing ``deviation`` against ``stay``."""
-    const, coefficient = tagged_values(auction, stay, deviation, signal, refunds)
+    const, coefficient = tagged_values(auction, stay, deviation, signal)
     high = np.arange(auction.n)
     # Conditional on the tagged bidder's own signal, since the caller weights by that separately.
     weights = auction.own_and_others[signal] / signal_weight(auction, signal)
@@ -173,16 +154,15 @@ def seller_tables(auction: Auction, stay: np.ndarray, paid: np.ndarray) -> Tuple
     return price, payout
 
 
-def outcome(auction: Auction, sigma: np.ndarray, refunds: Optional[np.ndarray] = None) -> Outcome:
+def outcome(auction: Auction, sigma: np.ndarray) -> Outcome:
     """Exact expectations under a symmetric profile, on exit-round orbits rather than histories."""
     stay = anonymise(auction, sigma)
-    paid = auction.orbit_view if refunds is None else refunds
-    price, payout = seller_tables(auction, stay, paid)
+    price, payout = seller_tables(auction, stay, auction.orbit_view)
     n = auction.n
     high = np.arange(n + 1)
     seller = [float(np.sum(auction.signal_counts * table[0, high])) for table in (price, payout)]
     payoff = sum(
-        signal_weight(auction, signal) * tagged_payoff(auction, stay, stay, signal, refunds)
+        signal_weight(auction, signal) * tagged_payoff(auction, stay, stay, signal)
         for signal in (0, 1)
     )
     return Outcome(np.full(n, payoff), seller[0], seller[1])
@@ -194,32 +174,6 @@ def bucket_arrival(auction: Auction, sigma: np.ndarray) -> np.ndarray:
     return np.stack(
         [tagged_reach(auction, stay, signal, stay)[0].sum(axis=1) for signal in (0, 1)], axis=1
     )
-
-
-def gains(
-    auction: Auction, sigma: np.ndarray, own: Optional[np.ndarray] = None,
-    refunds: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Deviation gain and the reach weighting it, per history of that orbit, at each information set."""
-    stay = anonymise(auction, sigma)
-    paid = auction.orbit_view if refunds is None else refunds
-    gain = np.zeros((len(auction.orbits), 2))
-    reach = np.zeros_like(gain)
-    for signal in (0, 1):
-        mass, value_mass = tagged_reach(auction, stay, signal, own)
-        values = tagged_values(auction, stay, stay, signal, refunds)
-        for orbit in range(len(auction.orbits)):
-            for high in range(int(auction.orbit_active[orbit])):
-                if mass[orbit, high] == 0.0 and value_mass[orbit, high] == 0.0:
-                    continue
-                thin, staying, exiting = branches_at(auction, stay, values, orbit, high, paid[orbit])
-                gain[orbit, signal] += mass[orbit, high] * np.sum(
-                    thin * (staying[0] - exiting[0])
-                ) + value_mass[orbit, high] * np.sum(thin * (staying[1] - exiting[1]))
-                reach[orbit, signal] += mass[orbit, high]
-    # How many histories of each orbit leave a given bidder active.
-    spread = np.array([_arrangements(auction.n, departed) for _, departed in auction.orbits])[:, None]
-    return gain / spread, reach / spread
 
 
 def best_response(auction: Auction, stay: np.ndarray, signal: int) -> np.ndarray:

@@ -1,4 +1,4 @@
-"""Experiment 2: whether learning finds the paper's sorting equilibria at two, four and six bidders."""
+"""The experiment: whether learning finds the paper's sorting equilibria and revenue gaps at two, four and six bidders."""
 
 from __future__ import annotations
 
@@ -16,47 +16,48 @@ from auction import symmetric
 from auction.exact import RESOLVED, certified, evaluate, utility_loss
 from auction.game import Auction, flat, opening_margin, preserve, sorting_profile, trigger
 from auction.mccfr import BUDGET, STAY_BAR, Verdict, solve
-from experiments.two_bidder import RESULTS, SEEDS, write
-
 COUNTS = (2, 4, 6)
-Q, KAPPA = 0.3, 0.05  # inside fin:trigger's cost bound up to eight bidders
-ABOVE_MARGIN = 0.05  # how far the high cost sits above the opening margin, so Preserve pays c - w0 > 0
-WORKERS = 4  # a six-bidder run holds about 3 GB
-CHUNK = 3  # seeds per job, so a job builds its tables once for several runs
+Q = 0.3
+COSTS = (0.025, 0.05, 0.1)  # kappa, inside fin:trigger's cost bound at every count
+SEEDS = 5
+WORKERS = 3  # a six-bidder run peaks near 2.1 GB, and the machine has 16 GB
 
-# Each run learns under its own policy. Full gives every bidder the frictionless payoff on every path,
-# so the frictionless runs are scored under Full as well instead of learning it again.
-RUNS = ("zero", "trigger", "preserve", "frictionless", "preserve_high")
-SCORED_UNDER = {"frictionless": ("frictionless", "full", "full_high")}
-WAR_SCORED = ("zero", "trigger")  # theory states their stays only at the opening and in a two-survivor war
+# Each run learns under its own policy at one cost. Full gives every bidder the frictionless payoff on
+# every path, so one frictionless run per seed is scored under Full at every cost instead.
+LEARNED = ("zero", "trigger", "preserve")
+
+RESULTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 
 Row = Dict[str, object]
 
 
-def cost(n: int, policy: str) -> float:
-    """The cost per stay a policy is run at."""
-    if policy == "frictionless":
-        return 0.0
-    return opening_margin(n, Q) + ABOVE_MARGIN if policy.endswith("_high") else KAPPA
+def write(name: str, rows: Sequence[Row]) -> None:
+    """Write ``rows`` as a CSV file of the given name under ``results``."""
+    os.makedirs(RESULTS, exist_ok=True)
+    path = os.path.join(RESULTS, name)
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"wrote {path} ({len(rows)} rows)")
 
 
-def auction_at(n: int, policy: str) -> Auction:
+def auction_at(n: int, policy: str, c: float) -> Auction:
     """The auction on the theorem's clock: step a/2 from zero to the cap n a, signals independent."""
-    rounds, c = 2 * n, cost(n, policy)
+    rounds = 2 * n
     rule = {
         "zero": lambda: flat(c, rounds, 0.0),
         "frictionless": lambda: flat(c, rounds, 0.0),
         "trigger": lambda: trigger(c, n),
         "preserve": lambda: preserve(c, rounds, n, Q),
         "full": lambda: flat(c, rounds),
-    }[policy.removesuffix("_high")]()
+    }[policy]()
     return Auction(n=n, q=Q, c=c, rounds=rounds, delta=0.5, reimbursement_policy=rule)
 
 
-def trigger_gain(n: int) -> float:
-    """Trigger less None in seller net revenue, fin:revenue-gain."""
-    return math.comb(n, 2) * Q**2 * (1 - Q) ** (n - 2) * 2 * KAPPA / 9 * (
-        9 - 42 * KAPPA + 92 * KAPPA**2 - 64 * KAPPA**3)
+def trigger_gain(n: int, c: float) -> float:
+    """Trigger less None in seller net revenue, fin:revenue-gain, with a = 1 so kappa is c."""
+    return math.comb(n, 2) * Q**2 * (1 - Q) ** (n - 2) * 2 * c / 9 * (9 - 42 * c + 92 * c**2 - 64 * c**3)
 
 
 def preserve_saving(n: int, c: float) -> float:
@@ -86,121 +87,120 @@ def two_survivor_revenue(auction: Auction, sigma: np.ndarray) -> float:
     return total
 
 
-def scored(auction: Auction, policy: str, theory: np.ndarray) -> np.ndarray:
-    """(orbit, signal) sets where theory states a stay probability and its own play arrives."""
-    mask = symmetric.bucket_arrival(auction, theory) > RESOLVED
-    if policy in WAR_SCORED:
-        stated = np.array([round_index == 0 or departed.count(0) == auction.n - 2
-                           for round_index, departed in auction.orbits])
-        mask &= stated[:, None]
-    return mask
-
-
 def row_for(n: int, policy: str, seed: int, auction: Auction, theory: np.ndarray, profile: np.ndarray) -> Row:
     """One learned profile scored against theory under one policy."""
     learned, target = symmetric.anonymise(auction, profile), symmetric.anonymise(auction, theory)
-    distance = float(np.abs(learned - target)[scored(auction, policy, theory)].max())
+    distance = float(np.abs(learned - target)[symmetric.bucket_arrival(auction, theory) > RESOLVED].max())
     loss = float(utility_loss(auction, profile))
     if loss > certified(n):
         verdict = Verdict.UNSOLVED
     else:
         verdict = Verdict.DERIVED if distance <= STAY_BAR else Verdict.DIFFERENT
-    row: Row = {
+    return {
         "n": n, "policy": policy, "c": auction.c, "seed": seed, "verdict": verdict.value,
         "utility_loss": loss, "distance": distance,
         "Pi": evaluate(auction, profile).revenue, "Pi_theory": evaluate(auction, theory).revenue,
         "Pi_two_survivor": two_survivor_revenue(auction, profile),
         "open_high": learned[0, 1], "open_low": learned[0, 0],
     }
-    for t in (1, 2, 3):  # both survivors still in, so no exits after the opening
-        orbit = auction.orbits.index((t, (0,) * (n - 2)))
-        row[f"war_t{t}"], row[f"war_t{t}_theory"] = learned[orbit, 1], target[orbit, 1]
-    return row
 
 
-def run_job(job: Tuple[int, str, Tuple[int, ...], int]) -> List[Row]:
-    """Every seed of one run at one bidder count, scored under each policy it stands for."""
-    n, run, seeds, iterations = job
-    learner = auction_at(n, run)
-    scorers = {policy: auction_at(n, policy) for policy in SCORED_UNDER.get(run, (run,))}
-    theories = {policy: sorting_profile(auction) for policy, auction in scorers.items()}
-    for policy, auction in scorers.items():
-        assert utility_loss(auction, theories[policy]) <= certified(n), (n, policy)
+RUNS = [(run, c) for run in LEARNED for c in COSTS] + [("frictionless", 0.0)]
+
+
+def written(run: str, c: float) -> List[Tuple[str, float]]:
+    """The (policy, cost) rows one run writes."""
+    return [("frictionless", 0.0)] + [("full", k) for k in COSTS] if run == "frictionless" else [(run, c)]
+
+
+def run_job(job: Tuple[int, str, float, int, int]) -> List[Row]:
+    """One seed of one run, scored under each policy and cost it stands for."""
+    n, run, c, seed, iterations = job
+    scored_under = {(policy, k): auction_at(n, policy, k) for policy, k in written(run, c)}
+    theories = {key: sorting_profile(auction) for key, auction in scored_under.items()}
+    for key, auction in scored_under.items():
+        assert utility_loss(auction, theories[key]) <= certified(n), (n, key)
+    started = time.perf_counter()
+    profile = solve(auction_at(n, run, c), seed, iterations)
     rows = []
-    for seed in seeds:
-        started = time.perf_counter()
-        profile = solve(learner, seed=seed, iterations=iterations, trace_every=iterations,
-                        symmetry_restricted=True).profile
-        for policy, auction in scorers.items():
-            rows.append(row_for(n, policy, seed, auction, theories[policy], profile))
-            print(f"  n={n} {policy:13s} seed={seed} {rows[-1]['verdict']:9s} "
-                  f"loss {rows[-1]['utility_loss']:.2e}  Pi {rows[-1]['Pi']:.4f}  "
-                  f"{time.perf_counter() - started:.0f} s", flush=True)
+    for (policy, k), auction in scored_under.items():
+        rows.append(row_for(n, policy, seed, auction, theories[(policy, k)], profile))
+        print(f"  n={n} {policy:13s} c={k:.3f} seed={seed} {rows[-1]['verdict']:9s} "
+              f"loss {rows[-1]['utility_loss']:.2e}  Pi {rows[-1]['Pi']:.4f}  "
+              f"{time.perf_counter() - started:.0f} s", flush=True)
     return rows
 
 
+def key(row: Row) -> Tuple[int, str, float, int]:
+    """What identifies a saved row: bidder count, policy, cost and seed."""
+    return int(row["n"]), str(row["policy"]), float(row["c"]), int(row["seed"])
+
+
 def pending(done: Iterable[Row], counts: Sequence[int], seeds: Sequence[int],
-            iterations: int = BUDGET) -> List[Tuple[int, str, Tuple[int, ...], int]]:
-    """Jobs for every run and seed not saved yet, largest bidder count first."""
-    saved = {(int(row["n"]), str(row["policy"]), int(row["seed"])) for row in done}
-    jobs = []
-    for n in sorted(counts, reverse=True):
-        for run in RUNS:
-            missing = [seed for seed in seeds if (n, run, seed) not in saved]
-            jobs += [(n, run, tuple(missing[i:i + CHUNK]), iterations) for i in range(0, len(missing), CHUNK)]
-    return jobs
+            iterations: int = BUDGET) -> List[Tuple[int, str, float, int, int]]:
+    """Jobs for every run and seed with a row not saved yet, largest bidder count first."""
+    saved = {key(row) for row in done}
+    return [
+        (n, run, c, seed, iterations)
+        for n in sorted(counts, reverse=True)
+        for run, c in RUNS
+        for seed in seeds
+        if any((n, policy, k, seed) not in saved for policy, k in written(run, c))
+    ]
 
 
 def read_rows() -> List[Row]:
-    """The saved runs, or none before the first."""
+    """The saved runs on the current grid, or none before the first."""
     path = os.path.join(RESULTS, "scale.csv")
     if not os.path.exists(path):
         return []
     with open(path) as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle))
+    grid = {written_key for run, c in RUNS for written_key in written(run, c)}
+    return [row for row in rows if (row["policy"], float(row["c"])) in grid and int(row["seed"]) < SEEDS]
 
 
 def claims(rows: Sequence[Row]) -> List[Row]:
-    """Per bidder count, the learned revenue differences beside the formulas, over runs that reached an equilibrium."""
+    """Per bidder count and cost, the learned revenue differences beside the formulas, over runs that reached an equilibrium."""
     reached = [row for row in rows if row["verdict"] != Verdict.UNSOLVED.value]
-    revenue = lambda n, policy, column="Pi": [float(row[column]) for row in reached
-                                              if int(row["n"]) == n and row["policy"] == policy]
+    revenue = lambda n, c, policy, column="Pi": [float(row[column]) for row in reached
+                                                 if (int(row["n"]), row["policy"], float(row["c"])) == (n, policy, c)]
     out = []
     for n in sorted({int(row["n"]) for row in rows}):
-        if not all(revenue(n, p) for p in ("zero", "trigger")):
-            continue
-        gain = np.mean(revenue(n, "trigger")) - np.mean(revenue(n, "zero"))
-        war = np.mean(revenue(n, "trigger", "Pi_two_survivor")) - np.mean(revenue(n, "zero", "Pi_two_survivor"))
-        out.append({
-            "n": n, "claim": "trigger_minus_none", "learned": gain, "predicted": trigger_gain(n),
-            "two_survivor_part": war, "elsewhere_part": gain - war,
-            "passes": bool(gain > 0 and abs(gain - trigger_gain(n)) <= 0.25 * trigger_gain(n)),
-        })
-        for suffix in ("", "_high"):
-            if revenue(n, "preserve" + suffix) and revenue(n, "full" + suffix):
-                saving = np.mean(revenue(n, "preserve" + suffix)) - np.mean(revenue(n, "full" + suffix))
-                out.append({"n": n, "claim": "preserve_minus_full" + suffix, "learned": saving,
-                            "predicted": preserve_saving(n, cost(n, "preserve" + suffix))})
+        for c in COSTS:
+            if not all(revenue(n, c, p) for p in ("zero", "trigger")):
+                continue
+            gain = np.mean(revenue(n, c, "trigger")) - np.mean(revenue(n, c, "zero"))
+            war = (np.mean(revenue(n, c, "trigger", "Pi_two_survivor"))
+                   - np.mean(revenue(n, c, "zero", "Pi_two_survivor")))
+            out.append({
+                "n": n, "c": c, "claim": "trigger_minus_none", "learned": gain, "predicted": trigger_gain(n, c),
+                "two_survivor_part": war, "elsewhere_part": gain - war,
+                "passes": bool(gain > 0 and abs(gain - trigger_gain(n, c)) <= 0.25 * trigger_gain(n, c)),
+            })
+            if revenue(n, c, "preserve") and revenue(n, c, "full"):
+                saving = np.mean(revenue(n, c, "preserve")) - np.mean(revenue(n, c, "full"))
+                out.append({"n": n, "c": c, "claim": "preserve_minus_full", "learned": saving,
+                            "predicted": preserve_saving(n, c)})
     return out
 
 
 def experiment(counts: Sequence[int] = COUNTS, seeds: Sequence[int] = range(SEEDS)) -> List[Row]:
     """Run every pending seed, saving after each job, then print the revenue claims."""
-    rows = read_rows()
-    jobs = pending(rows, counts, seeds)
+    rows = {key(row): row for row in read_rows()}
+    jobs = pending(rows.values(), counts, seeds)
     with ProcessPoolExecutor(WORKERS) as pool:
         for finished in as_completed([pool.submit(run_job, job) for job in jobs]):
-            rows += finished.result()
-            rows.sort(key=lambda row: (int(row["n"]), str(row["policy"]), int(row["seed"])))
-            write("scale.csv", rows)
-    for claim in claims(rows):
-        print("  " + "  ".join(f"{key} {value:.4f}" if isinstance(value, float) else f"{key} {value}"
-                               for key, value in claim.items()))
-    return rows
+            rows |= {key(row): row for row in finished.result()}
+            write("scale.csv", [rows[k] for k in sorted(rows)])
+    for claim in claims(list(rows.values())):
+        print("  " + "  ".join(f"{name} {value:.4f}" if isinstance(value, float) else f"{name} {value}"
+                               for name, value in claim.items()))
+    return list(rows.values())
 
 
 def seed_range(text: str) -> range:
-    """``3`` or ``0-9``."""
+    """``3`` or ``0-4``."""
     first, _, last = text.partition("-")
     return range(int(first), int(last or first) + 1)
 

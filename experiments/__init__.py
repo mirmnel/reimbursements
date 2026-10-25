@@ -1,1 +1,1 @@
-"""The three experiments, and the figures drawn from their results."""
+"""The two experiments, and the figures drawn from their results."""
