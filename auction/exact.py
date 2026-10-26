@@ -7,7 +7,7 @@ import numpy as np
 from . import symmetric
 from .game import Auction, Outcome, payoff_scale
 
-CERTIFIED = 1e-3  # the paper's epsilon: the utility loss a certified two-bidder profile clears
+CERTIFIED = 1e-3  # utility-loss threshold at two bidders
 RESOLVED = 1e-12  # the least counterfactual reach a gain can be divided by without amplifying noise
 
 

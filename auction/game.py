@@ -114,8 +114,6 @@ class Auction:
     rounds: int  # decision rounds
     delta: float  # tick size
 
-    # Tables below build on first use: history tables outgrow memory past seven bidders.
-
     @cached_property
     def profiles(self) -> np.ndarray:
         """One row per signal profile, giving each bidder a high or a low signal."""
